@@ -8,5 +8,5 @@ Copiloto fiscal integrado ao WhatsApp para captura, classificacao e auditoria de
 - `n8n/`: workflows de automacao e documentacao operacional.
 - `backend/`: prompts, scripts auxiliares e geracao de dossies.
 - `docs/`: notas tecnicas em Markdown para Obsidian.
-- `.IA/`: contexto persistente para sessoes futuras de IA.
-
+- `AGENTS.md`: contexto persistente compartilhado para sessoes futuras de IA.
+- `CLAUDE.md`: ponte de compatibilidade para Claude Code via import de `AGENTS.md`.
