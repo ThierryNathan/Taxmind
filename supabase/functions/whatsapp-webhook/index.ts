@@ -85,7 +85,7 @@ serve(async (request) => {
     const events = extractInboundMessages(payload);
 
     for (const event of events) {
-      await upsertWhatsAppSession(event);
+      const sessionId = await upsertWhatsAppSession(event);
 
       if (event.message.type === "text" && isGreeting(event.message.text?.body ?? "")) {
         const onboardingUrl = await createOnboardingUrl(event);
@@ -103,6 +103,7 @@ serve(async (request) => {
       await forwardToN8n({
         source: "whatsapp-cloud-api",
         event_type: "inbound_message",
+        session_id: sessionId,
         normalized: event.normalized,
         raw_value: event.value,
       });
@@ -172,7 +173,7 @@ function extractInboundMessages(payload: any) {
   return events;
 }
 
-async function upsertWhatsAppSession(event: InboundEvent) {
+async function upsertWhatsAppSession(event: InboundEvent): Promise<string | null> {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
   const phone = normalizeBrazilianPhone(event.message.from);
@@ -216,24 +217,32 @@ async function upsertWhatsAppSession(event: InboundEvent) {
 
     if (updateError) {
       console.error("failed to update whatsapp session", updateError);
+      return null;
     }
-    return;
+    return existingSession.id;
   }
 
-  const { error } = await supabase.from("sessoes_whatsapp").insert({
-    telefone_whatsapp: phone,
-    wa_id: event.waId,
-    ultima_mensagem_id: event.message.id,
-    status: "ABERTA",
-    aberta_em: now.toISOString(),
-    ultima_interacao_em: now.toISOString(),
-    expira_em: expiresAt.toISOString(),
-    contexto: incomingContext,
-  });
+  const { data: inserted, error } = await supabase
+    .from("sessoes_whatsapp")
+    .insert({
+      telefone_whatsapp: phone,
+      wa_id: event.waId,
+      ultima_mensagem_id: event.message.id,
+      status: "ABERTA",
+      aberta_em: now.toISOString(),
+      ultima_interacao_em: now.toISOString(),
+      expira_em: expiresAt.toISOString(),
+      contexto: incomingContext,
+    })
+    .select("id")
+    .single();
 
   if (error) {
     console.error("failed to insert whatsapp session", error);
+    return null;
   }
+
+  return inserted?.id ?? null;
 }
 
 async function createOnboardingUrl(event: InboundEvent) {

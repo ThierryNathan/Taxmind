@@ -13,6 +13,7 @@ com o formato:
 {
   "source": "whatsapp-cloud-api",
   "event_type": "inbound_message",
+  "session_id": "uuid da linha em sessoes_whatsapp ou null",
   "normalized": {
     "message_id": "wamid...",
     "wa_id": "5511999999999",
