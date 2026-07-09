@@ -1,20 +1,23 @@
-# Dependências
-node_modules
-package-lock.json
-
-# Build
-dist
-dist-ssr
-
-# Variáveis de ambiente (NUNCA suba sua chave!)
 .env
 .env.local
+.env.*.local
 
-# Logs
-*.log
-npm-debug.log*
+node_modules/
+dist/
+build/
+.vite/
 
-# Editor
-.vscode/*
+__pycache__/
+*.pyc
+.venv/
+venv/
+
 .DS_Store
-*.swp
+Thumbs.db
+
+.supabase/
+supabase/.branches/
+
+n8n/.n8n/
+n8n/credentials.real.json
+

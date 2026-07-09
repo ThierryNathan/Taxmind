@@ -1,0 +1,20 @@
+# Dependências
+node_modules
+package-lock.json
+
+# Build
+dist
+dist-ssr
+
+# Variáveis de ambiente (NUNCA suba sua chave!)
+.env
+.env.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/*
+.DS_Store
+*.swp

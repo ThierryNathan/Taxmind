@@ -1,0 +1,28 @@
+name: TaxMind CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    name: Validate repository artifacts
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate n8n workflow JSON
+        run: |
+          find n8n/workflows -name "*.json" -print0 | while IFS= read -r -d '' file; do
+            jq empty "$file"
+          done
+
+      - name: Check SQL migrations exist
+        run: |
+          test -d supabase/migrations
+          find supabase/migrations -name "*.sql" | grep -q .
+

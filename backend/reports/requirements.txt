@@ -1,0 +1,4 @@
+reportlab
+pydantic
+python-dotenv
+
