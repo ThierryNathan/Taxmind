@@ -31,3 +31,24 @@ com o formato:
   "raw_value": {}
 }
 ```
+
+## receipt-ocr-classification.json
+
+Recebe o payload acima, roteia por `normalized.message_type` (OCR via
+`gpt-4o` para `image`/`document`, classificacao textual via `gpt-4o-mini`
+para `text`), grava o resultado em `recibos_evidencias` e responde ao
+usuario no WhatsApp. Usa o prompt de `backend/prompts/taxmind_system_prompt.js`
+embutido no node `Preparar Contexto` (mantenha os dois arquivos em sincronia
+manualmente ao editar o prompt).
+
+Variaveis de ambiente esperadas no processo do n8n (configuradas fora do
+JSON do workflow, nunca commitadas):
+
+- `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`
+- `OPENAI_API_KEY`
+- `SUPABASE_PROJECT_REF`, `SUPABASE_SERVICE_ROLE_KEY`
+
+O node `Supabase - Buscar usuario_id da Sessao` falha propositalmente se a
+sessao ainda nao tiver `usuario_id` vinculado (usuario nao concluiu o
+onboarding via `bootstrap-identity`). Upload do arquivo original para bucket
+seguro (ver `AGENTS.md`) ainda nao esta implementado neste workflow.
