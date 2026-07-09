@@ -132,6 +132,7 @@ for each row execute function public.set_atualizado_em();
 create index idx_usuarios_telefone_whatsapp on public.usuarios (telefone_whatsapp);
 create index idx_sessoes_whatsapp_usuario_id on public.sessoes_whatsapp (usuario_id);
 create index idx_sessoes_whatsapp_telefone_status on public.sessoes_whatsapp (telefone_whatsapp, status);
+create index idx_sessoes_whatsapp_wa_status_expira on public.sessoes_whatsapp (wa_id, status, expira_em);
 create index idx_sessoes_whatsapp_expira_em on public.sessoes_whatsapp (expira_em);
 create index idx_recibos_usuario_data on public.recibos_evidencias (usuario_id, data_despesa desc);
 create index idx_recibos_usuario_categoria on public.recibos_evidencias (usuario_id, categoria);
@@ -174,4 +175,3 @@ for update to authenticated using (usuario_id = auth.uid()) with check (usuario_
 
 create policy "recibos_delete_proprios" on public.recibos_evidencias
 for delete to authenticated using (usuario_id = auth.uid());
-

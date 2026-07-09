@@ -108,7 +108,9 @@ async function recordSessionContext(
     .from("sessoes_whatsapp")
     .select("id, contexto")
     .eq("wa_id", tokenPayload.wa_id)
-    .order("criado_em", { ascending: false })
+    .eq("status", "ABERTA")
+    .gt("expira_em", new Date().toISOString())
+    .order("ultima_interacao_em", { ascending: false })
     .limit(1);
 
   if (selectError || !sessions?.[0]) {
