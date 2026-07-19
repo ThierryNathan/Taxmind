@@ -1,52 +1,44 @@
 {
-  "name": "TaxMind - Receipt OCR Classification",
+  "name": "receipt-ocr-classification",
   "nodes": [
     {
-      "id": "webhook-inbound-message",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "receipt-ocr-classification",
+        "options": {}
+      },
+      "id": "81098c01-7c5b-479b-bd31-b918298f80f5",
       "name": "Webhook - Mensagem Inbound",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
       "position": [
-        0,
-        300
+        -660,
+        160
       ],
-      "parameters": {
-        "httpMethod": "POST",
-        "path": "receipt-ocr-classification",
-        "responseMode": "onReceived",
-        "options": {}
-      },
       "webhookId": "receipt-ocr-classification"
     },
     {
-      "id": "preparar-contexto",
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const body = $input.item.json.body;\nconst normalized = body.normalized || {};\nconst messageType = normalized.message_type;\n\nconst origemPorTipo = {\n  text: \"WHATSAPP_TEXTO\",\n  image: \"WHATSAPP_IMAGEM\",\n  document: \"WHATSAPP_DOCUMENTO\",\n};\n\nconst systemPrompt = \"Voce e o TaxMind, um copiloto fiscal brasileiro que funciona pelo WhatsApp.\\n\\nSua funcao no MVP e analisar mensagens, imagens OCRizadas, cupons, recibos,\\nnotas fiscais, comprovantes bancarios e descricoes livres enviadas por\\nprofissionais autonomos, pequenos empreendedores e clientes de contadores.\\n\\nVoce nao substitui contador, advogado ou a Receita Federal. Voce organiza\\nevidencias, classifica riscos e prepara um dossie auditavel para revisao.\\nQuando houver duvida material, dado ausente ou risco de glosa, marque revisao\\nhumana. Nunca invente dados fiscais, documentos, codigos, datas ou valores.\\n\\nTOM\\n- Portugues do Brasil.\\n- Informal, direto e amigavel.\\n- Seja curto na mensagem ao usuario.\\n- Seja rigoroso, conservador e estruturado na saida tecnica.\\n\\nOBJETIVO PRINCIPAL\\nExtrair e classificar uma despesa a partir da entrada do usuario, retornando:\\n1. descricao normalizada;\\n2. valor monetario;\\n3. data da despesa;\\n4. estabelecimento ou prestador;\\n5. CPF/CNPJ/documento do prestador quando existir;\\n6. categoria fiscal;\\n7. status de dedutibilidade no IRPF;\\n8. justificativa fiscal curta;\\n9. evidencias encontradas;\\n10. pendencias para auditoria;\\n11. nivel de confianca;\\n12. necessidade de revisao humana.\\n\\nCATEGORIAS FISCAIS PERMITIDAS\\nUse exatamente uma destas categorias:\\n- SAUDE\\n- EDUCACAO\\n- ALIMENTACAO\\n- TRANSPORTE\\n- MORADIA\\n- ESCRITORIO\\n- EQUIPAMENTOS\\n- SOFTWARE\\n- INTERNET_TELEFONIA\\n- SERVICOS_PROFISSIONAIS\\n- IMPOSTOS_TAXAS\\n- OUTROS\\n\\nSTATUS DE DEDUTIBILIDADE PERMITIDOS\\nUse exatamente um destes status:\\n- DEDUTIVEL\\n- NAO_DEDUTIVEL\\n- PARCIALMENTE_DEDUTIVEL\\n- INDETERMINADO\\n\\nREGRAS FISCAIS CONSERVADORAS PARA IRPF\\nClassifique como DEDUTIVEL apenas quando a evidencia for forte o bastante.\\nClassifique como INDETERMINADO quando depender de contexto que nao esta na\\nmensagem, como vinculo com atividade profissional, dependente, reembolso,\\nescrituracao em livro-caixa ou comprovacao formal.\\n\\n1. SAUDE\\nPode ser potencialmente dedutivel no IRPF quando houver indicios de servico\\nde saude aceito, como medico, dentista, psicologo, fisioterapeuta,\\nfonoaudiologo, terapeuta ocupacional, hospital, laboratorio, exame,\\nradiologia, aparelho ortopedico, protese ortopedica ou protese dentaria.\\n\\nMarque DEDUTIVEL somente se houver:\\n- valor;\\n- data ou competencia;\\n- identificacao do prestador ou estabelecimento;\\n- indicio claro de servico/produto de saude dedutivel;\\n- ausencia de indicio de reembolso integral.\\n\\nMarque REVISAO_HUMANA quando:\\n- for compra generica de farmacia sem prescricao ou sem relacao clara com\\n  tratamento dedutivel;\\n- houver estetica, cosmetico, suplemento, academia, massagem relaxante,\\n  procedimento sem finalidade medica clara ou item ambiguo;\\n- faltar documento do prestador;\\n- houver divergencia entre texto, OCR e valor;\\n- houver reembolso, coparticipacao, plano de saude ou comprovante parcial.\\n\\nValidacao medica de nicho:\\n- Procure codigos TUSS, CBHPM, CID, CRM, CRO, CNES, guia de consulta,\\n  procedimento, honorarios medicos, exame, laudo, SADT, ambulatorial,\\n  internacao, consulta, terapia, sessao, laboratorio e termos equivalentes.\\n- Se encontrar TUSS/CBHPM/CID/CRM/CRO/CNES ou termos tecnicos equivalentes,\\n  preencha possui_indicio_tuss_cbhpm como true quando aplicavel e liste os\\n  codigos ou termos em codigos_medicos_identificados e termos_auditoria_identificados.\\n- Nao valide se o codigo e real; apenas extraia o que aparece e sinalize para\\n  auditoria posterior.\\n\\n2. EDUCACAO\\nPode ser potencialmente dedutivel quando indicar instituicao de ensino e\\nmensalidade ou anuidade de educacao formal, como creche, pre-escola, ensino\\nfundamental, medio, superior, especializacao ou curso profissionalizante.\\n\\nMarque INDETERMINADO ou REVISAO_HUMANA quando envolver curso livre, idioma,\\nreforco, material escolar, uniforme, transporte escolar, app educacional ou\\ntreinamento corporativo sem comprovacao de enquadramento.\\n\\n3. LIVRO-CAIXA / ATIVIDADE PROFISSIONAL DE AUTONOMO\\nPara autonomos, algumas despesas podem ser dedutiveis via livro-caixa quando\\nforem necessarias a atividade, escrituradas e comprovadas. Exemplos possiveis:\\naluguel de consultorio, luz, telefone, internet, material de escritorio,\\nservicos profissionais, manutencao, salario/encargos de auxiliares,\\nsoftware de trabalho e despesas compartilhadas rateadas.\\n\\nUse PARCIALMENTE_DEDUTIVEL ou INDETERMINADO se a despesa pode ter uso misto\\npessoal/profissional, como internet residencial, celular, computador, veiculo,\\ncombustivel, alimentacao, coworking, assinatura de software generico ou aluguel.\\nInclua pendencia pedindo contexto de uso profissional e comprovacao.\\n\\n4. ALIMENTACAO\\nEm regra, trate como NAO_DEDUTIVEL para IRPF pessoal. Para autonomo, pode\\nser INDETERMINADO apenas se houver contexto profissional forte e necessidade\\nde revisao do contador. Nunca aprove automaticamente alimentacao.\\n\\n5. TRANSPORTE\\nEm regra, trate como INDETERMINADO quando relacionado a atividade profissional\\ne NAO_DEDUTIVEL quando claramente pessoal. Combustivel, app de transporte,\\nestacionamento, pedagio e manutencao de veiculo exigem contexto de atividade,\\nrateio e comprovacao.\\n\\n6. MORADIA\\nAluguel, condominio, energia e agua residenciais sao normalmente pessoais.\\nUse INDETERMINADO/PARCIALMENTE_DEDUTIVEL apenas quando houver indicio de\\nhome office, consultorio, sublocacao, aluguel que produz rendimento ou rateio\\nprofissional documentado.\\n\\n7. ESCRITORIO, EQUIPAMENTOS, SOFTWARE, INTERNET_TELEFONIA\\nPodem ser despesas de atividade profissional para autonomo, mas exigem nexo\\ncom a atividade. Se o nexo nao estiver claro, marque INDETERMINADO e peca\\ncomplementacao. Se houver uso misto, prefira PARCIALMENTE_DEDUTIVEL.\\n\\n8. IMPOSTOS_TAXAS\\nClassifique taxas, emolumentos, alvaras, conselhos profissionais, tributos,\\ncertidoes e taxas bancarias aqui. A dedutibilidade depende do contexto.\\nSe forem diretamente ligadas a atividade profissional, use INDETERMINADO ou\\nPARCIALMENTE_DEDUTIVEL com revisao humana.\\n\\n9. OUTROS\\nUse quando a despesa nao se encaixar ou a evidencia for insuficiente.\\nNa duvida, nao force categoria dedutivel.\\n\\nREGRAS DE OCR E EVIDENCIA\\n- Diferencie texto visto na evidencia de inferencias suas.\\n- Se o OCR estiver truncado, borrado ou contraditorio, reduza confidence_score.\\n- Se houver varios valores, escolha o total apenas quando estiver claramente\\n  identificado como total, valor pago, valor liquido ou valor da nota.\\n- Preserve valor_original quando aparecer no texto; normalize valor como numero.\\n- Datas brasileiras podem vir como DD/MM/AAAA. Normalize em ISO AAAA-MM-DD\\n  quando possivel.\\n- CPF/CNPJ deve ser extraido somente se aparecer. Nao complete digitos.\\n- Nunca exponha CPF completo na mensagem ao usuario. Na saida tecnica, use\\n  documento_prestador exatamente como extraido, pois sera protegido no backend.\\n\\nCONFIDENCE SCORE\\nUse numero de 0 a 1.\\n- 0.90 a 1.00: evidencia clara, valor unico, categoria clara, documento coerente.\\n- 0.75 a 0.89: bom sinal, mas falta algum detalhe menor.\\n- 0.50 a 0.74: ambiguo, OCR parcial, categoria provavel ou contexto insuficiente.\\n- abaixo de 0.50: baixa confianca, muitos dados ausentes ou contraditorios.\\n\\nREGRAS DE REVISAO HUMANA\\nrequer_revisao_humana deve ser true quando:\\n- confidence_score < 0.85;\\n- deducibilidade for INDETERMINADO ou PARCIALMENTE_DEDUTIVEL;\\n- categoria for SAUDE e faltar prestador, documento, tipo de servico ou data;\\n- houver indicio de gasto medico ambiguo, estetico ou farmacia generica;\\n- houver uso misto pessoal/profissional;\\n- houver possivel reembolso;\\n- houver OCR ruim ou contradicao entre campos;\\n- valor for alto, incomum ou sem comprovante claro;\\n- a decisao depender de contador, livro-caixa, dependente, alimentando ou\\n  comprovacao externa.\\n\\nFORMATO DE RESPOSTA OBRIGATORIO\\nResponda sempre com duas partes:\\n\\n1. Uma mensagem curta para o usuario, fora das tags.\\n2. Um bloco tecnico unico dentro de <expense>...</expense> contendo JSON valido.\\n\\nNao coloque Markdown dentro de <expense>. Nao use comentarios no JSON.\\nNao adicione texto depois de </expense>.\\n\\nSCHEMA DO JSON\\n{\\n  \\\"tipo\\\": \\\"expense_classification\\\",\\n  \\\"versao_prompt\\\": \\\"taxmind-irpf-mvp-2026-07-09\\\",\\n  \\\"descricao\\\": \\\"string curta e normalizada\\\",\\n  \\\"descricao_original\\\": \\\"string ou null\\\",\\n  \\\"valor\\\": 0.00,\\n  \\\"valor_original\\\": \\\"string ou null\\\",\\n  \\\"moeda\\\": \\\"BRL\\\",\\n  \\\"data_despesa\\\": \\\"AAAA-MM-DD ou null\\\",\\n  \\\"estabelecimento\\\": \\\"string ou null\\\",\\n  \\\"documento_prestador\\\": \\\"string ou null\\\",\\n  \\\"categoria\\\": \\\"SAUDE|EDUCACAO|ALIMENTACAO|TRANSPORTE|MORADIA|ESCRITORIO|EQUIPAMENTOS|SOFTWARE|INTERNET_TELEFONIA|SERVICOS_PROFISSIONAIS|IMPOSTOS_TAXAS|OUTROS\\\",\\n  \\\"deducibilidade\\\": \\\"DEDUTIVEL|NAO_DEDUTIVEL|PARCIALMENTE_DEDUTIVEL|INDETERMINADO\\\",\\n  \\\"justificativa_deducibilidade\\\": \\\"string curta\\\",\\n  \\\"confidence_score\\\": 0.00,\\n  \\\"requer_revisao_humana\\\": true,\\n  \\\"motivos_revisao\\\": [\\\"string\\\"],\\n  \\\"evidencias_extraidas\\\": [\\\"string\\\"],\\n  \\\"campos_ausentes\\\": [\\\"string\\\"],\\n  \\\"possui_indicio_tuss_cbhpm\\\": false,\\n  \\\"codigos_medicos_identificados\\\": [\\\"string\\\"],\\n  \\\"termos_auditoria_identificados\\\": [\\\"string\\\"],\\n  \\\"alertas_lgpd\\\": [\\\"string\\\"],\\n  \\\"pergunta_de_followup\\\": \\\"string ou null\\\",\\n  \\\"mensagem_usuario\\\": \\\"string curta\\\"\\n}\\n\\nREGRAS PARA CAMPOS\\n- valor deve ser numero JSON. Se nao houver valor confiavel, use 0 e marque\\n  revisao humana com campo ausente \\\"valor\\\".\\n- descricao nunca deve ficar vazia; se nao houver descricao, use \\\"Despesa nao identificada\\\".\\n- motivos_revisao deve ser [] apenas quando requer_revisao_humana for false.\\n- campos_ausentes deve listar dados importantes que faltaram.\\n- pergunta_de_followup deve conter no maximo uma pergunta objetiva quando faltar\\n  dado essencial. Caso nao precise perguntar nada, use null.\\n- mensagem_usuario deve ser igual, ou semanticamente equivalente, a mensagem\\n  curta enviada antes do bloco <expense>.\\n\\nEXEMPLO DE RESPOSTA\\nBoa, registrei como despesa de saude e vou deixar separado para revisao do contador.\\n<expense>{\\n  \\\"tipo\\\": \\\"expense_classification\\\",\\n  \\\"versao_prompt\\\": \\\"taxmind-irpf-mvp-2026-07-09\\\",\\n  \\\"descricao\\\": \\\"Consulta medica\\\",\\n  \\\"descricao_original\\\": \\\"consulta clinica\\\",\\n  \\\"valor\\\": 350.00,\\n  \\\"valor_original\\\": \\\"R$ 350,00\\\",\\n  \\\"moeda\\\": \\\"BRL\\\",\\n  \\\"data_despesa\\\": \\\"2026-07-09\\\",\\n  \\\"estabelecimento\\\": \\\"Clinica Exemplo\\\",\\n  \\\"documento_prestador\\\": null,\\n  \\\"categoria\\\": \\\"SAUDE\\\",\\n  \\\"deducibilidade\\\": \\\"INDETERMINADO\\\",\\n  \\\"justificativa_deducibilidade\\\": \\\"Despesa medica pode ser dedutivel, mas falta documento do prestador para auditoria.\\\",\\n  \\\"confidence_score\\\": 0.78,\\n  \\\"requer_revisao_humana\\\": true,\\n  \\\"motivos_revisao\\\": [\\\"Falta documento do prestador\\\", \\\"Classificacao fiscal depende de comprovacao formal\\\"],\\n  \\\"evidencias_extraidas\\\": [\\\"consulta clinica\\\", \\\"R$ 350,00\\\", \\\"Clinica Exemplo\\\"],\\n  \\\"campos_ausentes\\\": [\\\"documento_prestador\\\"],\\n  \\\"possui_indicio_tuss_cbhpm\\\": false,\\n  \\\"codigos_medicos_identificados\\\": [],\\n  \\\"termos_auditoria_identificados\\\": [\\\"consulta\\\"],\\n  \\\"alertas_lgpd\\\": [\\\"Documento pode conter dado sensivel de saude\\\"],\\n  \\\"pergunta_de_followup\\\": \\\"Voce tem o recibo com CPF ou CNPJ do prestador?\\\",\\n  \\\"mensagem_usuario\\\": \\\"Boa, registrei como despesa de saude e vou deixar separado para revisao do contador.\\\"\\n}</expense>\";\n\nreturn {\n  json: {\n    session_id: body.session_id || null,\n    message_type: messageType,\n    text_body: normalized.text_body || null,\n    media_id: normalized.media_id || null,\n    media_mime_type: normalized.media_mime_type || null,\n    media_caption: normalized.media_caption || null,\n    media_sha256: normalized.media_sha256 || null,\n    media_filename: normalized.media_filename || null,\n    wa_id: normalized.wa_id,\n    phone: normalized.phone,\n    profile_name: normalized.profile_name || null,\n    origem: origemPorTipo[messageType] || \"WHATSAPP_TEXTO\",\n    system_prompt: systemPrompt,\n  },\n};"
+      },
+      "id": "bca27a5a-374a-42d4-9cb7-99bb533880fb",
       "name": "Preparar Contexto",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        220,
-        300
-      ],
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const body = $input.item.json;\nconst normalized = body.normalized || {};\nconst messageType = normalized.message_type;\n\nconst origemPorTipo = {\n  text: \"WHATSAPP_TEXTO\",\n  image: \"WHATSAPP_IMAGEM\",\n  document: \"WHATSAPP_DOCUMENTO\",\n};\n\nconst systemPrompt = \"Voce e o TaxMind, um copiloto fiscal brasileiro que funciona pelo WhatsApp.\\n\\nSua funcao no MVP e analisar mensagens, imagens OCRizadas, cupons, recibos,\\nnotas fiscais, comprovantes bancarios e descricoes livres enviadas por\\nprofissionais autonomos, pequenos empreendedores e clientes de contadores.\\n\\nVoce nao substitui contador, advogado ou a Receita Federal. Voce organiza\\nevidencias, classifica riscos e prepara um dossie auditavel para revisao.\\nQuando houver duvida material, dado ausente ou risco de glosa, marque revisao\\nhumana. Nunca invente dados fiscais, documentos, codigos, datas ou valores.\\n\\nTOM\\n- Portugues do Brasil.\\n- Informal, direto e amigavel.\\n- Seja curto na mensagem ao usuario.\\n- Seja rigoroso, conservador e estruturado na saida tecnica.\\n\\nOBJETIVO PRINCIPAL\\nExtrair e classificar uma despesa a partir da entrada do usuario, retornando:\\n1. descricao normalizada;\\n2. valor monetario;\\n3. data da despesa;\\n4. estabelecimento ou prestador;\\n5. CPF/CNPJ/documento do prestador quando existir;\\n6. categoria fiscal;\\n7. status de dedutibilidade no IRPF;\\n8. justificativa fiscal curta;\\n9. evidencias encontradas;\\n10. pendencias para auditoria;\\n11. nivel de confianca;\\n12. necessidade de revisao humana.\\n\\nCATEGORIAS FISCAIS PERMITIDAS\\nUse exatamente uma destas categorias:\\n- SAUDE\\n- EDUCACAO\\n- ALIMENTACAO\\n- TRANSPORTE\\n- MORADIA\\n- ESCRITORIO\\n- EQUIPAMENTOS\\n- SOFTWARE\\n- INTERNET_TELEFONIA\\n- SERVICOS_PROFISSIONAIS\\n- IMPOSTOS_TAXAS\\n- OUTROS\\n\\nSTATUS DE DEDUTIBILIDADE PERMITIDOS\\nUse exatamente um destes status:\\n- DEDUTIVEL\\n- NAO_DEDUTIVEL\\n- PARCIALMENTE_DEDUTIVEL\\n- INDETERMINADO\\n\\nREGRAS FISCAIS CONSERVADORAS PARA IRPF\\nClassifique como DEDUTIVEL apenas quando a evidencia for forte o bastante.\\nClassifique como INDETERMINADO quando depender de contexto que nao esta na\\nmensagem, como vinculo com atividade profissional, dependente, reembolso,\\nescrituracao em livro-caixa ou comprovacao formal.\\n\\n1. SAUDE\\nPode ser potencialmente dedutivel no IRPF quando houver indicios de servico\\nde saude aceito, como medico, dentista, psicologo, fisioterapeuta,\\nfonoaudiologo, terapeuta ocupacional, hospital, laboratorio, exame,\\nradiologia, aparelho ortopedico, protese ortopedica ou protese dentaria.\\n\\nMarque DEDUTIVEL somente se houver:\\n- valor;\\n- data ou competencia;\\n- identificacao do prestador ou estabelecimento;\\n- indicio claro de servico/produto de saude dedutivel;\\n- ausencia de indicio de reembolso integral.\\n\\nMarque REVISAO_HUMANA quando:\\n- for compra generica de farmacia sem prescricao ou sem relacao clara com\\n  tratamento dedutivel;\\n- houver estetica, cosmetico, suplemento, academia, massagem relaxante,\\n  procedimento sem finalidade medica clara ou item ambiguo;\\n- faltar documento do prestador;\\n- houver divergencia entre texto, OCR e valor;\\n- houver reembolso, coparticipacao, plano de saude ou comprovante parcial.\\n\\nValidacao medica de nicho:\\n- Procure codigos TUSS, CBHPM, CID, CRM, CRO, CNES, guia de consulta,\\n  procedimento, honorarios medicos, exame, laudo, SADT, ambulatorial,\\n  internacao, consulta, terapia, sessao, laboratorio e termos equivalentes.\\n- Se encontrar TUSS/CBHPM/CID/CRM/CRO/CNES ou termos tecnicos equivalentes,\\n  preencha possui_indicio_tuss_cbhpm como true quando aplicavel e liste os\\n  codigos ou termos em codigos_medicos_identificados e termos_auditoria_identificados.\\n- Nao valide se o codigo e real; apenas extraia o que aparece e sinalize para\\n  auditoria posterior.\\n\\n2. EDUCACAO\\nPode ser potencialmente dedutivel quando indicar instituicao de ensino e\\nmensalidade ou anuidade de educacao formal, como creche, pre-escola, ensino\\nfundamental, medio, superior, especializacao ou curso profissionalizante.\\n\\nMarque INDETERMINADO ou REVISAO_HUMANA quando envolver curso livre, idioma,\\nreforco, material escolar, uniforme, transporte escolar, app educacional ou\\ntreinamento corporativo sem comprovacao de enquadramento.\\n\\n3. LIVRO-CAIXA / ATIVIDADE PROFISSIONAL DE AUTONOMO\\nPara autonomos, algumas despesas podem ser dedutiveis via livro-caixa quando\\nforem necessarias a atividade, escrituradas e comprovadas. Exemplos possiveis:\\naluguel de consultorio, luz, telefone, internet, material de escritorio,\\nservicos profissionais, manutencao, salario/encargos de auxiliares,\\nsoftware de trabalho e despesas compartilhadas rateadas.\\n\\nUse PARCIALMENTE_DEDUTIVEL ou INDETERMINADO se a despesa pode ter uso misto\\npessoal/profissional, como internet residencial, celular, computador, veiculo,\\ncombustivel, alimentacao, coworking, assinatura de software generico ou aluguel.\\nInclua pendencia pedindo contexto de uso profissional e comprovacao.\\n\\n4. ALIMENTACAO\\nEm regra, trate como NAO_DEDUTIVEL para IRPF pessoal. Para autonomo, pode\\nser INDETERMINADO apenas se houver contexto profissional forte e necessidade\\nde revisao do contador. Nunca aprove automaticamente alimentacao.\\n\\n5. TRANSPORTE\\nEm regra, trate como INDETERMINADO quando relacionado a atividade profissional\\ne NAO_DEDUTIVEL quando claramente pessoal. Combustivel, app de transporte,\\nestacionamento, pedagio e manutencao de veiculo exigem contexto de atividade,\\nrateio e comprovacao.\\n\\n6. MORADIA\\nAluguel, condominio, energia e agua residenciais sao normalmente pessoais.\\nUse INDETERMINADO/PARCIALMENTE_DEDUTIVEL apenas quando houver indicio de\\nhome office, consultorio, sublocacao, aluguel que produz rendimento ou rateio\\nprofissional documentado.\\n\\n7. ESCRITORIO, EQUIPAMENTOS, SOFTWARE, INTERNET_TELEFONIA\\nPodem ser despesas de atividade profissional para autonomo, mas exigem nexo\\ncom a atividade. Se o nexo nao estiver claro, marque INDETERMINADO e peca\\ncomplementacao. Se houver uso misto, prefira PARCIALMENTE_DEDUTIVEL.\\n\\n8. IMPOSTOS_TAXAS\\nClassifique taxas, emolumentos, alvaras, conselhos profissionais, tributos,\\ncertidoes e taxas bancarias aqui. A dedutibilidade depende do contexto.\\nSe forem diretamente ligadas a atividade profissional, use INDETERMINADO ou\\nPARCIALMENTE_DEDUTIVEL com revisao humana.\\n\\n9. OUTROS\\nUse quando a despesa nao se encaixar ou a evidencia for insuficiente.\\nNa duvida, nao force categoria dedutivel.\\n\\nREGRAS DE OCR E EVIDENCIA\\n- Diferencie texto visto na evidencia de inferencias suas.\\n- Se o OCR estiver truncado, borrado ou contraditorio, reduza confidence_score.\\n- Se houver varios valores, escolha o total apenas quando estiver claramente\\n  identificado como total, valor pago, valor liquido ou valor da nota.\\n- Preserve valor_original quando aparecer no texto; normalize valor como numero.\\n- Datas brasileiras podem vir como DD/MM/AAAA. Normalize em ISO AAAA-MM-DD\\n  quando possivel.\\n- CPF/CNPJ deve ser extraido somente se aparecer. Nao complete digitos.\\n- Nunca exponha CPF completo na mensagem ao usuario. Na saida tecnica, use\\n  documento_prestador exatamente como extraido, pois sera protegido no backend.\\n\\nCONFIDENCE SCORE\\nUse numero de 0 a 1.\\n- 0.90 a 1.00: evidencia clara, valor unico, categoria clara, documento coerente.\\n- 0.75 a 0.89: bom sinal, mas falta algum detalhe menor.\\n- 0.50 a 0.74: ambiguo, OCR parcial, categoria provavel ou contexto insuficiente.\\n- abaixo de 0.50: baixa confianca, muitos dados ausentes ou contraditorios.\\n\\nREGRAS DE REVISAO HUMANA\\nrequer_revisao_humana deve ser true quando:\\n- confidence_score < 0.85;\\n- deducibilidade for INDETERMINADO ou PARCIALMENTE_DEDUTIVEL;\\n- categoria for SAUDE e faltar prestador, documento, tipo de servico ou data;\\n- houver indicio de gasto medico ambiguo, estetico ou farmacia generica;\\n- houver uso misto pessoal/profissional;\\n- houver possivel reembolso;\\n- houver OCR ruim ou contradicao entre campos;\\n- valor for alto, incomum ou sem comprovante claro;\\n- a decisao depender de contador, livro-caixa, dependente, alimentando ou\\n  comprovacao externa.\\n\\nFORMATO DE RESPOSTA OBRIGATORIO\\nResponda sempre com duas partes:\\n\\n1. Uma mensagem curta para o usuario, fora das tags.\\n2. Um bloco tecnico unico dentro de <expense>...</expense> contendo JSON valido.\\n\\nNao coloque Markdown dentro de <expense>. Nao use comentarios no JSON.\\nNao adicione texto depois de </expense>.\\n\\nSCHEMA DO JSON\\n{\\n  \\\"tipo\\\": \\\"expense_classification\\\",\\n  \\\"versao_prompt\\\": \\\"taxmind-irpf-mvp-2026-07-09\\\",\\n  \\\"descricao\\\": \\\"string curta e normalizada\\\",\\n  \\\"descricao_original\\\": \\\"string ou null\\\",\\n  \\\"valor\\\": 0.00,\\n  \\\"valor_original\\\": \\\"string ou null\\\",\\n  \\\"moeda\\\": \\\"BRL\\\",\\n  \\\"data_despesa\\\": \\\"AAAA-MM-DD ou null\\\",\\n  \\\"estabelecimento\\\": \\\"string ou null\\\",\\n  \\\"documento_prestador\\\": \\\"string ou null\\\",\\n  \\\"categoria\\\": \\\"SAUDE|EDUCACAO|ALIMENTACAO|TRANSPORTE|MORADIA|ESCRITORIO|EQUIPAMENTOS|SOFTWARE|INTERNET_TELEFONIA|SERVICOS_PROFISSIONAIS|IMPOSTOS_TAXAS|OUTROS\\\",\\n  \\\"deducibilidade\\\": \\\"DEDUTIVEL|NAO_DEDUTIVEL|PARCIALMENTE_DEDUTIVEL|INDETERMINADO\\\",\\n  \\\"justificativa_deducibilidade\\\": \\\"string curta\\\",\\n  \\\"confidence_score\\\": 0.00,\\n  \\\"requer_revisao_humana\\\": true,\\n  \\\"motivos_revisao\\\": [\\\"string\\\"],\\n  \\\"evidencias_extraidas\\\": [\\\"string\\\"],\\n  \\\"campos_ausentes\\\": [\\\"string\\\"],\\n  \\\"possui_indicio_tuss_cbhpm\\\": false,\\n  \\\"codigos_medicos_identificados\\\": [\\\"string\\\"],\\n  \\\"termos_auditoria_identificados\\\": [\\\"string\\\"],\\n  \\\"alertas_lgpd\\\": [\\\"string\\\"],\\n  \\\"pergunta_de_followup\\\": \\\"string ou null\\\",\\n  \\\"mensagem_usuario\\\": \\\"string curta\\\"\\n}\\n\\nREGRAS PARA CAMPOS\\n- valor deve ser numero JSON. Se nao houver valor confiavel, use 0 e marque\\n  revisao humana com campo ausente \\\"valor\\\".\\n- descricao nunca deve ficar vazia; se nao houver descricao, use \\\"Despesa nao identificada\\\".\\n- motivos_revisao deve ser [] apenas quando requer_revisao_humana for false.\\n- campos_ausentes deve listar dados importantes que faltaram.\\n- pergunta_de_followup deve conter no maximo uma pergunta objetiva quando faltar\\n  dado essencial. Caso nao precise perguntar nada, use null.\\n- mensagem_usuario deve ser igual, ou semanticamente equivalente, a mensagem\\n  curta enviada antes do bloco <expense>.\\n\\nEXEMPLO DE RESPOSTA\\nBoa, registrei como despesa de saude e vou deixar separado para revisao do contador.\\n<expense>{\\n  \\\"tipo\\\": \\\"expense_classification\\\",\\n  \\\"versao_prompt\\\": \\\"taxmind-irpf-mvp-2026-07-09\\\",\\n  \\\"descricao\\\": \\\"Consulta medica\\\",\\n  \\\"descricao_original\\\": \\\"consulta clinica\\\",\\n  \\\"valor\\\": 350.00,\\n  \\\"valor_original\\\": \\\"R$ 350,00\\\",\\n  \\\"moeda\\\": \\\"BRL\\\",\\n  \\\"data_despesa\\\": \\\"2026-07-09\\\",\\n  \\\"estabelecimento\\\": \\\"Clinica Exemplo\\\",\\n  \\\"documento_prestador\\\": null,\\n  \\\"categoria\\\": \\\"SAUDE\\\",\\n  \\\"deducibilidade\\\": \\\"INDETERMINADO\\\",\\n  \\\"justificativa_deducibilidade\\\": \\\"Despesa medica pode ser dedutivel, mas falta documento do prestador para auditoria.\\\",\\n  \\\"confidence_score\\\": 0.78,\\n  \\\"requer_revisao_humana\\\": true,\\n  \\\"motivos_revisao\\\": [\\\"Falta documento do prestador\\\", \\\"Classificacao fiscal depende de comprovacao formal\\\"],\\n  \\\"evidencias_extraidas\\\": [\\\"consulta clinica\\\", \\\"R$ 350,00\\\", \\\"Clinica Exemplo\\\"],\\n  \\\"campos_ausentes\\\": [\\\"documento_prestador\\\"],\\n  \\\"possui_indicio_tuss_cbhpm\\\": false,\\n  \\\"codigos_medicos_identificados\\\": [],\\n  \\\"termos_auditoria_identificados\\\": [\\\"consulta\\\"],\\n  \\\"alertas_lgpd\\\": [\\\"Documento pode conter dado sensivel de saude\\\"],\\n  \\\"pergunta_de_followup\\\": \\\"Voce tem o recibo com CPF ou CNPJ do prestador?\\\",\\n  \\\"mensagem_usuario\\\": \\\"Boa, registrei como despesa de saude e vou deixar separado para revisao do contador.\\\"\\n}</expense>\";\n\nreturn {\n  json: {\n    session_id: body.session_id || null,\n    message_type: messageType,\n    text_body: normalized.text_body || null,\n    media_id: normalized.media_id || null,\n    media_mime_type: normalized.media_mime_type || null,\n    media_caption: normalized.media_caption || null,\n    media_sha256: normalized.media_sha256 || null,\n    media_filename: normalized.media_filename || null,\n    wa_id: normalized.wa_id,\n    phone: normalized.phone,\n    profile_name: normalized.profile_name || null,\n    origem: origemPorTipo[messageType] || \"WHATSAPP_TEXTO\",\n    system_prompt: systemPrompt,\n  },\n};"
-      }
+        -440,
+        160
+      ]
     },
     {
-      "id": "rotear-tipo-mensagem",
-      "name": "Rotear por Tipo de Mensagem",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [
-        440,
-        300
-      ],
       "parameters": {
         "conditions": {
           "options": {
             "caseSensitive": true,
             "leftValue": "",
-            "typeValidation": "strict"
+            "typeValidation": "strict",
+            "version": 1
           },
           "conditions": [
             {
@@ -62,21 +54,19 @@
           "combinator": "and"
         },
         "options": {}
-      }
+      },
+      "id": "08a99181-b519-44d6-be4e-76bffd2f315f",
+      "name": "Rotear por Tipo de Mensagem",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        160
+      ]
     },
     {
-      "id": "graph-resolver-url-midia",
-      "name": "Graph API - Resolver URL da Midia",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        660,
-        460
-      ],
       "parameters": {
-        "method": "GET",
         "url": "=https://graph.facebook.com/v20.0/{{ $json.media_id }}",
-        "authentication": "none",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -87,21 +77,19 @@
           ]
         },
         "options": {}
-      }
-    },
-    {
-      "id": "graph-baixar-binario-midia",
-      "name": "Graph API - Baixar Binario da Midia",
+      },
+      "id": "40b61827-dc37-4787-85e1-e1e1c70df6a6",
+      "name": "Graph API - Resolver URL da Mídia",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        880,
-        460
-      ],
+        0,
+        320
+      ]
+    },
+    {
       "parameters": {
-        "method": "GET",
         "url": "={{ $json.url }}",
-        "authentication": "none",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -114,128 +102,137 @@
         "options": {
           "response": {
             "response": {
-              "responseFormat": "file",
-              "outputPropertyName": "data"
+              "responseFormat": "file"
             }
           }
         }
-      }
+      },
+      "id": "e05d98d8-9c2e-4a47-bbc2-9a465de60779",
+      "name": "Graph API - Baixar Binário da Mídia",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        320
+      ]
     },
     {
-      "id": "converter-midia-base64",
-      "name": "Converter Midia em Base64",
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const binary = await this.helpers.getBinaryDataBuffer(0, \"data\");\nconst base64 = binary.toString(\"base64\");\nconst contexto = $(\"Preparar Contexto\").item.json;\nconst mediaResolvida = $(\"Graph API - Resolver URL da Mídia\").item.json;\nconst mimeType = contexto.media_mime_type || mediaResolvida.mime_type || \"application/octet-stream\";\n\nreturn {\n  json: {\n    base64_data: base64,\n    media_mime_type: mimeType,\n    system_prompt: contexto.system_prompt,\n    media_caption: contexto.media_caption,\n  },\n};"
+      },
+      "id": "9f74fd9a-442d-4c12-bc6a-e55f3f1b33d7",
+      "name": "Converter Mídia em Base64",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1100,
-        460
-      ],
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const binary = await this.helpers.getBinaryDataBuffer(0, \"data\");\nconst base64 = binary.toString(\"base64\");\nconst contexto = $(\"Preparar Contexto\").item.json;\nconst mediaResolvida = $(\"Graph API - Resolver URL da Midia\").item.json;\nconst mimeType = contexto.media_mime_type || mediaResolvida.mime_type || \"application/octet-stream\";\n\nreturn {\n  json: {\n    image_data_uri: `data:${mimeType};base64,${base64}`,\n  },\n};"
-      }
+        440,
+        320
+      ]
     },
     {
-      "id": "openai-classificacao-visual",
-      "name": "OpenAI - Classificacao Visual",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1320,
-        460
-      ],
       "parameters": {
         "method": "POST",
-        "url": "https://api.openai.com/v1/chat/completions",
-        "authentication": "none",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: \"gpt-4o\", temperature: 0.2, max_tokens: 1200, messages: [ { role: \"system\", content: $(\"Preparar Contexto\").item.json.system_prompt }, { role: \"user\", content: [ { type: \"text\", text: $(\"Preparar Contexto\").item.json.media_caption || \"Classifique este comprovante em anexo.\" }, { type: \"image_url\", image_url: { url: $json.image_data_uri } } ] } ] }) }}",
-        "options": {}
-      }
-    },
-    {
-      "id": "openai-classificacao-textual",
-      "name": "OpenAI - Classificacao Textual",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        660,
-        140
-      ],
-      "parameters": {
-        "method": "POST",
-        "url": "https://api.openai.com/v1/chat/completions",
-        "authentication": "none",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Authorization",
-              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: \"gpt-4o-mini\", temperature: 0.2, max_tokens: 1000, messages: [ { role: \"system\", content: $(\"Preparar Contexto\").item.json.system_prompt }, { role: \"user\", content: $(\"Preparar Contexto\").item.json.text_body } ] }) }}",
-        "options": {}
-      }
-    },
-    {
-      "id": "extrair-bloco-expense",
-      "name": "Extrair Bloco Expense",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1540,
-        300
-      ],
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const response = $input.item.json;\nconst content = (response.choices && response.choices[0] && response.choices[0].message && response.choices[0].message.content) || \"\";\n\nconst match = content.match(/<expense>([\\s\\S]*?)<\\/expense>/);\nif (!match) {\n  throw new Error(\"Resposta da IA nao contem bloco <expense>...</expense>: \" + content.slice(0, 300));\n}\n\nlet expense;\ntry {\n  expense = JSON.parse(match[1]);\n} catch (err) {\n  throw new Error(\"Falha ao parsear JSON do bloco <expense>: \" + err.message);\n}\n\nconst requiredFields = [\n  \"descricao\",\n  \"valor\",\n  \"categoria\",\n  \"deducibilidade\",\n  \"confidence_score\",\n  \"requer_revisao_humana\",\n  \"mensagem_usuario\",\n];\nfor (const field of requiredFields) {\n  if (expense[field] === undefined) {\n    throw new Error(\"Campo obrigatorio ausente no JSON da IA: \" + field);\n  }\n}\n\nconst mensagemAntesDoBloco = content.split(\"<expense>\")[0].trim();\n\nreturn {\n  json: {\n    expense,\n    mensagem_usuario: mensagemAntesDoBloco || expense.mensagem_usuario,\n    ai_raw_response: content,\n  },\n};"
-      }
-    },
-    {
-      "id": "supabase-buscar-usuario-sessao",
-      "name": "Supabase - Buscar usuario_id da Sessao",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        1760,
-        300
-      ],
-      "parameters": {
-        "method": "GET",
-        "url": "=https://{{ $env.SUPABASE_PROJECT_REF }}.supabase.co/rest/v1/sessoes_whatsapp",
-        "authentication": "none",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
             {
-              "name": "id",
-              "value": "=eq.{{ $(\"Preparar Contexto\").item.json.session_id }}"
-            },
+              "name": "key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [ { role: \"user\", parts: [ { text: $json.system_prompt + \"\\n\\nLegenda enviada pelo usuário: \" + ($json.media_caption || \"sem legenda\") }, { inline_data: { mime_type: $json.media_mime_type, data: $json.base64_data } } ] } ], generationConfig: { temperature: 0.2, maxOutputTokens: 1200 } }) }}",
+        "options": {}
+      },
+      "id": "e5d3221a-6549-4e13-be3b-c2af28cb4752",
+      "name": "Gemini - Classificação Visual",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [ { role: \"user\", parts: [ { text: $json.system_prompt + \"\\n\\nMensagem do usuário: \" + $json.text_body } ] } ], generationConfig: { temperature: 0.2, maxOutputTokens: 4096 } }) }}",
+        "options": {}
+      },
+      "id": "67d533b2-5d4e-44a5-a7cc-7e9bad6b1585",
+      "name": "Gemini - Classificação Textual",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const response = $input.item.json;\n\n// Gemini retorna em candidates[0].content.parts[0].text\nconst content = (\n  response?.candidates?.[0]?.content?.parts?.[0]?.text ||\n  response?.choices?.[0]?.message?.content ||\n  \"\"\n);\n\n// Limpa escapes que o Gemini às vezes adiciona\nconst cleaned = content\n  .replace(/\\\\n/g, '\\n')\n  .replace(/\\\\\"/g, '\"')\n  .replace(/\\\\\\\\/g, '\\\\');\n\nconst match = cleaned.match(/<expense>([\\s\\S]*?)<\\/expense>/);\n\nif (!match) {\n  throw new Error(`Resposta da IA nao contem bloco <expense>...</expense>: ${cleaned.substring(0, 200)}`);\n}\n\nlet expenseJson;\ntry {\n  expenseJson = JSON.parse(match[1].trim());\n} catch (e) {\n  throw new Error(`JSON invalido dentro do bloco expense: ${e.message}\\nConteudo: ${match[1].substring(0, 200)}`);\n}\n\nconst mensagemUsuario = cleaned.split('<expense>')[0].trim();\n\nreturn {\n  json: {\n    expense: expenseJson,\n    mensagem_usuario: mensagemUsuario || expenseJson.mensagem_usuario,\n    session_id: $('Preparar Contexto').item.json.session_id,\n    wa_id: $('Preparar Contexto').item.json.wa_id,\n    phone: $('Preparar Contexto').item.json.phone,\n  }\n};"
+      },
+      "id": "05598669-7f41-43df-b43d-f0a02e596d6c",
+      "name": "Extrair Bloco Expense",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sessoes_whatsapp",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
             {
               "name": "select",
               "value": "usuario_id"
+            },
+            {
+              "name": "id",
+              "value": "=eq.{{ $json.session_id }}"
+            },
+            {
+              "name": "limit",
+              "value": "1"
             }
           ]
         },
@@ -253,35 +250,34 @@
           ]
         },
         "options": {}
-      }
+      },
+      "id": "61c56ba6-82b1-423c-8f74-716be3d7a6cb",
+      "name": "Supabase - Buscar usuario_id da Sessão",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        160
+      ]
     },
     {
-      "id": "montar-payload-recibo",
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const contexto = $(\"Preparar Contexto\").item.json;\nconst parsed = $(\"Extrair Bloco Expense\").item.json.expense;\nconst sessaoResp = $input.item.json;\nconst usuarioId = Array.isArray(sessaoResp) ? (sessaoResp[0] && sessaoResp[0].usuario_id) : (sessaoResp && sessaoResp.usuario_id);\n\nif (!usuarioId) {\n  throw new Error(\"Sessao \" + contexto.session_id + \" ainda nao tem usuario_id vinculado (onboarding pendente)\");\n}\n\nconst status = parsed.requer_revisao_humana ? \"REVISAO_HUMANA\" : \"RECEBIDO\";\n\nreturn {\n  json: {\n    usuario_id: usuarioId,\n    sessao_whatsapp_id: contexto.session_id,\n    origem: contexto.origem,\n    status,\n    descricao: parsed.descricao,\n    estabelecimento: parsed.estabelecimento || null,\n    documento_prestador: parsed.documento_prestador || null,\n    data_despesa: parsed.data_despesa || null,\n    valor: parsed.valor,\n    categoria: parsed.categoria,\n    deducibilidade: parsed.deducibilidade,\n    justificativa_deducibilidade: parsed.justificativa_deducibilidade || null,\n    confidence_score: parsed.confidence_score,\n    requer_revisao_humana: parsed.requer_revisao_humana,\n    possui_indicio_tuss_cbhpm: parsed.possui_indicio_tuss_cbhpm || false,\n    codigos_medicos_identificados: parsed.codigos_medicos_identificados || [],\n    termos_auditoria_identificados: parsed.termos_auditoria_identificados || [],\n    arquivo_hash_sha256: contexto.media_sha256 || null,\n    metadados_ia: parsed,\n    mensagem_usuario: $(\"Extrair Bloco Expense\").item.json.mensagem_usuario,\n    wa_id: contexto.wa_id,\n  },\n};"
+      },
+      "id": "1ec21b50-753b-478c-bf1a-667fd39edd7b",
       "name": "Montar Payload do Recibo",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1980,
-        300
-      ],
-      "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const contexto = $(\"Preparar Contexto\").item.json;\nconst parsed = $(\"Extrair Bloco Expense\").item.json.expense;\nconst sessaoResp = $input.item.json;\nconst usuarioId = Array.isArray(sessaoResp) ? (sessaoResp[0] && sessaoResp[0].usuario_id) : (sessaoResp && sessaoResp.usuario_id);\n\nif (!usuarioId) {\n  throw new Error(\"Sessao \" + contexto.session_id + \" ainda nao tem usuario_id vinculado (onboarding pendente)\");\n}\n\nconst status = parsed.requer_revisao_humana ? \"REVISAO_HUMANA\" : \"RECEBIDO\";\n\nreturn {\n  json: {\n    usuario_id: usuarioId,\n    sessao_whatsapp_id: contexto.session_id,\n    origem: contexto.origem,\n    status,\n    descricao: parsed.descricao,\n    estabelecimento: parsed.estabelecimento || null,\n    documento_prestador: parsed.documento_prestador || null,\n    data_despesa: parsed.data_despesa || null,\n    valor: parsed.valor,\n    categoria: parsed.categoria,\n    deducibilidade: parsed.deducibilidade,\n    justificativa_deducibilidade: parsed.justificativa_deducibilidade || null,\n    confidence_score: parsed.confidence_score,\n    requer_revisao_humana: parsed.requer_revisao_humana,\n    possui_indicio_tuss_cbhpm: parsed.possui_indicio_tuss_cbhpm || false,\n    codigos_medicos_identificados: parsed.codigos_medicos_identificados || [],\n    termos_auditoria_identificados: parsed.termos_auditoria_identificados || [],\n    arquivo_hash_sha256: contexto.media_sha256 || null,\n    metadados_ia: parsed,\n    mensagem_usuario: $(\"Extrair Bloco Expense\").item.json.mensagem_usuario,\n    wa_id: contexto.wa_id,\n  },\n};"
-      }
+        1320,
+        160
+      ]
     },
     {
-      "id": "supabase-inserir-recibo",
-      "name": "Supabase - Inserir Recibo",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        2200,
-        300
-      ],
       "parameters": {
         "method": "POST",
-        "url": "=https://{{ $env.SUPABASE_PROJECT_REF }}.supabase.co/rest/v1/recibos_evidencias",
-        "authentication": "none",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/recibos_evidencias",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -300,10 +296,6 @@
             {
               "name": "Prefer",
               "value": "return=representation"
-            },
-            {
-              "name": "Accept",
-              "value": "application/vnd.pgrst.object+json"
             }
           ]
         },
@@ -311,28 +303,29 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ usuario_id: $json.usuario_id, sessao_whatsapp_id: $json.sessao_whatsapp_id, origem: $json.origem, status: $json.status, descricao: $json.descricao, estabelecimento: $json.estabelecimento, documento_prestador: $json.documento_prestador, data_despesa: $json.data_despesa, valor: $json.valor, categoria: $json.categoria, deducibilidade: $json.deducibilidade, justificativa_deducibilidade: $json.justificativa_deducibilidade, confidence_score: $json.confidence_score, requer_revisao_humana: $json.requer_revisao_humana, possui_indicio_tuss_cbhpm: $json.possui_indicio_tuss_cbhpm, codigos_medicos_identificados: $json.codigos_medicos_identificados, termos_auditoria_identificados: $json.termos_auditoria_identificados, arquivo_hash_sha256: $json.arquivo_hash_sha256, metadados_ia: $json.metadados_ia }) }}",
         "options": {}
-      }
+      },
+      "id": "aafe1be0-6420-487e-b29a-b9c9f817692d",
+      "name": "Supabase - Inserir Recibo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        160
+      ]
     },
     {
-      "id": "requer-revisao-humana",
-      "name": "Requer Revisao Humana",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [
-        2420,
-        300
-      ],
       "parameters": {
         "conditions": {
           "options": {
             "caseSensitive": true,
             "leftValue": "",
-            "typeValidation": "strict"
+            "typeValidation": "loose",
+            "version": 1
           },
           "conditions": [
             {
               "id": "cond-requer-revisao-false",
-              "leftValue": "={{ $(\"Montar Payload do Recibo\").item.json.requer_revisao_humana }}",
+              "leftValue": "={{ $json.requer_revisao_humana }}",
               "rightValue": "",
               "operator": {
                 "type": "boolean",
@@ -342,28 +335,29 @@
           ],
           "combinator": "and"
         },
-        "options": {}
-      }
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "f52108ef-7851-4b59-a8c7-f98541c5e624",
+      "name": "Requer Revisão Humana",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        160
+      ]
     },
     {
-      "id": "supabase-atualizar-status-aprovado",
-      "name": "Supabase - Atualizar Status Aprovado",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [
-        2640,
-        200
-      ],
       "parameters": {
         "method": "PATCH",
-        "url": "=https://{{ $env.SUPABASE_PROJECT_REF }}.supabase.co/rest/v1/recibos_evidencias",
-        "authentication": "none",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/recibos_evidencias",
         "sendQuery": true,
         "queryParameters": {
           "parameters": [
             {
               "name": "id",
-              "value": "=eq.{{ $(\"Supabase - Inserir Recibo\").item.json.id }}"
+              "value": "=eq.{{ $json.id }}"
             }
           ]
         },
@@ -392,21 +386,20 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ status: \"APROVADO_AUTOMATICAMENTE\" }) }}",
         "options": {}
-      }
-    },
-    {
-      "id": "whatsapp-enviar-resposta",
-      "name": "WhatsApp - Enviar Resposta ao Usuario",
+      },
+      "id": "fede6297-313d-486c-9782-c085257cda4d",
+      "name": "Supabase - Atualizar Status Aprovado",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2860,
-        300
-      ],
+        1980,
+        60
+      ]
+    },
+    {
       "parameters": {
         "method": "POST",
         "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
-        "authentication": "none",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -422,11 +415,20 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $(\"Preparar Contexto\").item.json.wa_id, type: \"text\", text: { preview_url: false, body: $(\"Montar Payload do Recibo\").item.json.mensagem_usuario } }) }}",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $(\"Preparar Contexto\").item.json.phone, type: \"text\", text: { body: $(\"Montar Payload do Recibo\").item.json.mensagem_usuario } }) }}",
         "options": {}
-      }
+      },
+      "id": "bc14faf0-cd51-4847-a778-cef1645f0ea8",
+      "name": "WhatsApp - Enviar Resposta ao Usuário",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        160
+      ]
     }
   ],
+  "pinData": {},
   "connections": {
     "Webhook - Mensagem Inbound": {
       "main": [
@@ -454,54 +456,54 @@
       "main": [
         [
           {
-            "node": "OpenAI - Classificacao Textual",
+            "node": "Gemini - Classificação Textual",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Graph API - Resolver URL da Midia",
+            "node": "Graph API - Resolver URL da Mídia",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Graph API - Resolver URL da Midia": {
+    "Graph API - Resolver URL da Mídia": {
       "main": [
         [
           {
-            "node": "Graph API - Baixar Binario da Midia",
+            "node": "Graph API - Baixar Binário da Mídia",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Graph API - Baixar Binario da Midia": {
+    "Graph API - Baixar Binário da Mídia": {
       "main": [
         [
           {
-            "node": "Converter Midia em Base64",
+            "node": "Converter Mídia em Base64",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Converter Midia em Base64": {
+    "Converter Mídia em Base64": {
       "main": [
         [
           {
-            "node": "OpenAI - Classificacao Visual",
+            "node": "Gemini - Classificação Visual",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "OpenAI - Classificacao Textual": {
+    "Gemini - Classificação Textual": {
       "main": [
         [
           {
@@ -512,7 +514,7 @@
         ]
       ]
     },
-    "OpenAI - Classificacao Visual": {
+    "Gemini - Classificação Visual": {
       "main": [
         [
           {
@@ -527,14 +529,14 @@
       "main": [
         [
           {
-            "node": "Supabase - Buscar usuario_id da Sessao",
+            "node": "Supabase - Buscar usuario_id da Sessão",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Supabase - Buscar usuario_id da Sessao": {
+    "Supabase - Buscar usuario_id da Sessão": {
       "main": [
         [
           {
@@ -560,14 +562,14 @@
       "main": [
         [
           {
-            "node": "Requer Revisao Humana",
+            "node": "Requer Revisão Humana",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Requer Revisao Humana": {
+    "Requer Revisão Humana": {
       "main": [
         [
           {
@@ -578,7 +580,7 @@
         ],
         [
           {
-            "node": "WhatsApp - Enviar Resposta ao Usuario",
+            "node": "WhatsApp - Enviar Resposta ao Usuário",
             "type": "main",
             "index": 0
           }
@@ -589,7 +591,7 @@
       "main": [
         [
           {
-            "node": "WhatsApp - Enviar Resposta ao Usuario",
+            "node": "WhatsApp - Enviar Resposta ao Usuário",
             "type": "main",
             "index": 0
           }
@@ -597,8 +599,14 @@
       ]
     }
   },
-  "active": false,
+  "active": true,
   "settings": {
     "executionOrder": "v1"
-  }
+  },
+  "versionId": "bf94cc7d-6e6a-4d02-a850-5258d7f2a8ef",
+  "meta": {
+    "instanceId": "1f30e69034394336460f691b1eabbafddbdb2184a162149d350887b589d5a76c"
+  },
+  "id": "if0WtGj5jwhhvhaB",
+  "tags": []
 }
