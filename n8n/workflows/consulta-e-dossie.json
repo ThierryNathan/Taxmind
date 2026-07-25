@@ -20,7 +20,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const body = $input.item.json.body;\nconst normalized = body.normalized || {};\nconst texto = normalized.text_body || \"\";\n\n// Casa palavra-chave sem depender de acento nem de caixa.\nconst alvo = texto\n  .normalize(\"NFD\")\n  .replace(/[\\u0300-\\u036f]/g, \"\")\n  .toLowerCase();\n\nconst contem = (termos) => termos.some((t) => alvo.includes(t));\n\n// Precedencia: o dossie e checado antes do resumo de proposito. \"resumo\" e\n// palavra comum e apareceria em \"manda o resumo em pdf\", onde a intencao real\n// e o arquivo. Os termos de dossie sao mais especificos, entao ganham.\nlet intent = null;\nif (contem([\"dossie\", \"relatorio\", \"pdf\", \"exportar\"])) {\n  intent = \"exportar_dossie\";\n} else if (contem([\"resumo\", \"extrato\", \"quanto tenho\"])) {\n  intent = \"consulta_resumo\";\n}\n\nreturn {\n  json: {\n    session_id: body.session_id || null,\n    message_type: normalized.message_type || null,\n    text_body: normalized.text_body || null,\n    wa_id: normalized.wa_id,\n    phone: normalized.phone,\n    profile_name: normalized.profile_name || null,\n    intent,\n  },\n};"
+        "jsCode": "const body = $input.item.json.body;\nconst normalized = body.normalized || {};\nconst texto = normalized.text_body || \"\";\n\n// Casa palavra-chave sem depender de acento nem de caixa.\nconst alvo = texto\n  .normalize(\"NFD\")\n  .replace(/[\\u0300-\\u036f]/g, \"\")\n  .toLowerCase();\n\nconst contem = (termos) => termos.some((t) => alvo.includes(t));\n\n// Precedencia: o dossie e checado antes do resumo de proposito. \"resumo\" e\n// palavra comum e apareceria em \"manda o resumo em pdf\", onde a intencao real\n// e o arquivo. Os termos de dossie sao mais especificos, entao ganham.\n//\n// Conectar banco vem antes de todos, mas exigindo DOIS eixos na mesma\n// mensagem: um verbo de conexao e um substantivo de conta/banco. Casar so\n// \"conta\" ou so \"banco\" roubaria \"me manda o resumo da minha conta\" e\n// \"quanto rende o CDB do meu banco\". O prefixo \"conect\"/\"vincul\" cobre as\n// conjugacoes (conecta, conectar, vincule) sem depender de adjacencia.\n// A guarda de \"desconect\"/\"desvincul\" existe porque \"conect\" casa dentro de\n// \"desconectar\": desconexao nao esta implementada e cai na IA.\nlet intent = null;\nif (contem([\"desconect\", \"desvincul\"])) {\n  intent = null;\n} else if (\n  contem([\"conect\", \"vincul\", \"sincroniz\", \"open finance\"]) &&\n  contem([\"banco\", \"conta\", \"bancari\", \"cartao\", \"open finance\"])\n) {\n  intent = \"conectar_banco\";\n} else if (contem([\"dossie\", \"relatorio\", \"pdf\", \"exportar\"])) {\n  intent = \"exportar_dossie\";\n} else if (contem([\"resumo\", \"extrato\", \"quanto tenho\"])) {\n  intent = \"consulta_resumo\";\n}\n\nreturn {\n  json: {\n    session_id: body.session_id || null,\n    message_type: normalized.message_type || null,\n    text_body: normalized.text_body || null,\n    wa_id: normalized.wa_id,\n    phone: normalized.phone,\n    profile_name: normalized.profile_name || null,\n    intent,\n  },\n};"
       },
       "id": "d8f5e368-ce04-4ce4-a994-946ecf279380",
       "name": "Preparar Contexto",
@@ -152,7 +152,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ contents: [ { role: \"user\", parts: [ { text: \"Classifique a mensagem do usuario em exatamente uma destas categorias: registro_despesa, consulta_resumo, exportar_dossie, outro. Responda APENAS a categoria, sem explicacao. Mensagem: \" + ($json.text_body || \"\") } ] } ], generationConfig: { temperature: 0, maxOutputTokens: 512, thinkingConfig: { thinkingLevel: \"low\" } } }) }}",
+        "jsonBody": "={{ JSON.stringify({ contents: [ { role: \"user\", parts: [ { text: \"Classifique a mensagem do usuario em exatamente uma destas categorias:\\n\\nregistro_despesa: o usuario esta informando uma despesa que fez.\\nconsulta_resumo: o usuario quer ver o proprio historico ou os totais ja registrados.\\nexportar_dossie: o usuario quer o relatorio ou o PDF das despesas dele.\\nconectar_banco: o usuario quer conectar, vincular ou sincronizar uma conta bancaria, um cartao ou o Open Finance ao TaxMind para importar transacoes automaticamente.\\nfora_do_escopo_financeiro: a mensagem trata de dinheiro, financas, investimento, credito, juros, emprestimo ou planejamento financeiro em geral, mas NAO e uma despesa a registrar nem uma consulta ao historico dele.\\noutro: qualquer coisa que nao se encaixe nas categorias acima.\\n\\nResponda APENAS a categoria, sem explicacao.\\n\\nMensagem: \" + ($json.text_body || \"\") } ] } ], generationConfig: { temperature: 0, maxOutputTokens: 512, thinkingConfig: { thinkingLevel: \"low\" } } }) }}",
         "options": {}
       },
       "id": "36d5ea37-876a-4f23-a17d-87aeaa30197a",
@@ -167,7 +167,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const ctx = $('Montar Contexto').item.json;\nconst resposta = $input.item.json;\n\nconst bruto = ((((resposta || {}).candidates || [])[0] || {}).content?.parts?.[0]?.text || \"\")\n  .toLowerCase()\n  .replace(/[^a-z_]/g, \"\");\n\nconst validos = [\"registro_despesa\", \"consulta_resumo\", \"exportar_dossie\", \"outro\"];\n\n// Gemini 3 Flash nao permite desligar thinking (so thinkingLevel minimal/low/\n// medium/high). Se o thinking consumir o maxOutputTokens, o texto volta vazio.\n// Cair em \"outro\" mantem o fluxo vivo com a mensagem de ajuda, em vez de\n// derrubar a execucao com intent indefinido.\nconst intent = validos.find((v) => bruto.includes(v)) || \"outro\";\n\nreturn { json: { ...ctx, intent } };"
+        "jsCode": "const ctx = $('Montar Contexto').item.json;\nconst resposta = $input.item.json;\n\nconst bruto = ((((resposta || {}).candidates || [])[0] || {}).content?.parts?.[0]?.text || \"\")\n  .toLowerCase()\n  .replace(/[^a-z_]/g, \"\");\n\n// \"outro\" fica por ultimo de proposito: e o fallback, e find() retorna o\n// primeiro match. As categorias especificas precisam ser testadas antes.\nconst validos = [\n  \"registro_despesa\",\n  \"consulta_resumo\",\n  \"exportar_dossie\",\n  \"conectar_banco\",\n  \"fora_do_escopo_financeiro\",\n  \"outro\",\n];\n\n// Gemini 3 Flash nao permite desligar thinking (so thinkingLevel minimal/low/\n// medium/high). Se o thinking consumir o maxOutputTokens, o texto volta vazio.\n// Cair em \"outro\" mantem o fluxo vivo com a mensagem de ajuda, em vez de\n// derrubar a execucao com intent indefinido.\nconst intent = validos.find((v) => bruto.includes(v)) || \"outro\";\n\nreturn { json: { ...ctx, intent } };"
       },
       "id": "3a884968-5502-47f5-af81-6e0b57d1ad81",
       "name": "Aplicar Intent da IA",
@@ -277,6 +277,54 @@
               },
               "renameOutput": true,
               "outputKey": "outro"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "rule-fora-do-escopo",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "fora_do_escopo_financeiro",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "fora_do_escopo_financeiro"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "rule-conectar-banco",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "conectar_banco",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "conectar_banco"
             }
           ]
         },
@@ -490,6 +538,99 @@
         0,
         500
       ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $json.phone, type: \"text\", text: { body: \"Ainda não ajudo com esse tipo de pergunta — meu foco hoje é registrar e classificar suas despesas dedutíveis no IRPF. Você pode me mandar um recibo (foto ou texto), pedir seu 'resumo' ou seu 'dossiê' em PDF.\" } }) }}",
+        "options": {}
+      },
+      "id": "3e83987d-fd5e-4ac6-ae7e-caf1a7908eab",
+      "name": "WhatsApp - Enviar Fora de Escopo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        660
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/functions/v1/pluggy-connect-link",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SECRET_KEY_SB_FORMAT }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ wa_id: $json.wa_id, phone: $json.phone }) }}",
+        "options": {}
+      },
+      "id": "b7c1f0a2-9d64-4a1b-8c33-5f2ad8e14c07",
+      "name": "Edge - Gerar Link Conectar Banco",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        820
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $('Montar Contexto').item.json.phone, type: \"text\", text: { preview_url: true, body: \"Vamos conectar sua conta bancária! Pelo link abaixo você autoriza o TaxMind a importar suas transações automaticamente, e aí eu já classifico as despesas dedutíveis sem você precisar mandar cada recibo.\\n\\n\" + $json.url + \"\\n\\nO link vale por 15 minutos. A conexão é feita no ambiente do Open Finance — o TaxMind nunca vê sua senha do banco.\" } }) }}",
+        "options": {}
+      },
+      "id": "e4a5d3c8-2b19-4f70-9a6e-1c8b7d5e0f42",
+      "name": "WhatsApp - Enviar Link Conectar Banco",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        820
+      ]
     }
   ],
   "pinData": {},
@@ -607,6 +748,20 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "WhatsApp - Enviar Fora de Escopo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edge - Gerar Link Conectar Banco",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -637,6 +792,17 @@
         [
           {
             "node": "WhatsApp - Enviar Dossiê",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edge - Gerar Link Conectar Banco": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Enviar Link Conectar Banco",
             "type": "main",
             "index": 0
           }

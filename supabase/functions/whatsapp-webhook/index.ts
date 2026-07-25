@@ -1,5 +1,14 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+// A assinatura do token HMAC saiu daqui para _shared na Fase 10, quando a
+// pluggy-connect-link passou a emitir o mesmo tipo de link (agora com
+// modo=conectar-banco). Mesmo codigo, um lugar so.
+import {
+  type BootstrapTokenPayload,
+  hmacSha256Hex,
+  signBootstrapToken,
+  timingSafeEqual,
+} from "../_shared/bootstrap_token.ts";
 
 type WhatsAppMedia = {
   id?: string;
@@ -45,14 +54,6 @@ type InboundEvent = {
     media_caption: string | null;
     received_at: string;
   };
-};
-
-type BootstrapTokenPayload = {
-  wa_id: string;
-  phone: string;
-  session_id: string;
-  exp: number;
-  nonce: string;
 };
 
 // "error" existe separado de "not_found" de proposito: so "not_found" dispara
@@ -312,16 +313,6 @@ async function createOnboardingUrl(event: InboundEvent) {
   return onboardingUrl.toString();
 }
 
-async function signBootstrapToken(payload: BootstrapTokenPayload) {
-  const encodedPayload = base64UrlEncode(JSON.stringify(payload));
-  const secret = env("TAXMIND_BOOTSTRAP_SECRET");
-  if (!secret) {
-    throw new Error("missing_bootstrap_secret");
-  }
-  const signature = await hmacSha256(secret, encodedPayload);
-  return `${encodedPayload}.${signature}`;
-}
-
 async function verifyMetaSignature(request: Request, rawBody: string) {
   const appSecret = env("WHATSAPP_APP_SECRET");
   if (!appSecret) {
@@ -404,60 +395,6 @@ function getMedia(message: WhatsAppInboundMessage) {
 function normalizeBrazilianPhone(raw: string) {
   const digits = raw.replace(/\D/g, "");
   return digits.startsWith("55") ? `+${digits}` : `+55${digits}`;
-}
-
-async function hmacSha256(secret: string, message: string) {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(message),
-  );
-  return base64UrlEncode(signature);
-}
-
-async function hmacSha256Hex(secret: string, message: string) {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(message),
-  );
-  return Array.from(new Uint8Array(signature))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function base64UrlEncode(value: string | ArrayBuffer) {
-  const bytes = typeof value === "string"
-    ? new TextEncoder().encode(value)
-    : new Uint8Array(value);
-  const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-}
-
-function timingSafeEqual(a: string, b: string) {
-  const left = new TextEncoder().encode(a);
-  const right = new TextEncoder().encode(b);
-  if (left.length !== right.length) return false;
-
-  let diff = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    diff |= left[index] ^ right[index];
-  }
-  return diff === 0;
 }
 
 function json(body: unknown, status = 200) {

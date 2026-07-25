@@ -43,6 +43,56 @@ A `whatsapp-webhook` escolhe o workflow de destino por `message_type`:
 
 O contrato de payload e identico nos dois casos.
 
+### Terceira origem: Open Finance (Fase 10)
+
+A `pluggy-webhook` encaminha transacoes bancarias para
+`N8N_OPENFINANCE_WEBHOOK_URL`, uma variavel separada das duas acima. O
+workflow consumidor **ainda nao existe** — a Edge Function ja publica, mas o
+proximo passo da fase e desenhar o workflow que classifica e grava essas
+transacoes em `recibos_evidencias` com `origem = 'OPEN_FINANCE'`.
+
+Por que nao reaproveitar `N8N_TEXT_WEBHOOK_URL`: o `consulta-e-dossie` resolve
+`usuario_id` consultando `sessoes_whatsapp` por `session_id` e le
+`normalized.text_body` para achar a intencao. Uma transacao bancaria nao tem
+sessao de WhatsApp nem texto de usuario, entao o node `Montar Contexto` falharia
+com "sessao sem usuario_id vinculado" em toda transacao. Alem disso o payload
+ja chega com `usuario_id` resolvido e sem intencao a classificar — o que falta
+e classificacao fiscal, trabalho do fluxo de recibo, nao do roteador de texto.
+
+Formato encaminhado (um POST por sincronizacao, com todas as transacoes novas):
+
+```json
+{
+  "source": "pluggy-open-finance",
+  "event_type": "transacoes_sincronizadas",
+  "usuario_id": "uuid do usuario TaxMind",
+  "item_id": "id do item no Pluggy",
+  "sincronizado_desde": "2026-06-25",
+  "total": 2,
+  "transacoes": [
+    {
+      "usuario_id": "uuid",
+      "item_id": "...",
+      "transaction_id": "...",
+      "account_id": "...",
+      "conta_nome": "Conta Corrente",
+      "descricao": "FARMACIA EXEMPLO",
+      "descricao_original": "COMPRA CARTAO FARMACIA EXEMPLO",
+      "valor": 87.4,
+      "moeda": "BRL",
+      "data_despesa": "2026-07-20",
+      "categoria_pluggy": "Pharmacy",
+      "estabelecimento": "Farmacia Exemplo",
+      "documento_prestador": "00000000000000"
+    }
+  ]
+}
+```
+
+`valor` ja vem positivo e so transacoes `DEBIT` e nao pendentes sao
+encaminhadas: entrada de dinheiro nao e despesa dedutivel, e transacao pendente
+ainda pode mudar de valor depois de gravada.
+
 ## receipt-ocr-classification.json
 
 Recebe o payload acima, roteia por `normalized.message_type` (classificacao
@@ -93,10 +143,24 @@ Destinos do `Switch por Intent`:
 | `consulta_resumo` | RPC `resumo_fiscal_usuario`, formata com emoji por categoria e envia texto. |
 | `exportar_dossie` | Chama a Edge Function `generate-dossier` e envia o PDF como `type: "document"` com a signed URL em `document.link`. |
 | `outro` | Mensagem de ajuda fixa. |
+| `fora_do_escopo_financeiro` | Mensagem fixa delimitando o escopo do produto. |
+| `conectar_banco` | Chama a Edge Function `pluggy-connect-link` e envia o link assinado de conexao bancaria. |
+
+O matcher de palavra-chave do `conectar_banco` exige **dois eixos** na mesma
+mensagem: um verbo de conexao (`conect`, `vincul`, `sincroniz`) e um
+substantivo de conta/banco (`banco`, `conta`, `bancari`, `cartao`), ou o termo
+`open finance` sozinho. Casar so "conta" ou so "banco" roubaria mensagens que
+pertencem a outros branches — "me manda o resumo da minha conta" e "quanto
+rende o CDB do meu banco". Ha ainda uma guarda para `desconect`/`desvincul`,
+porque `conect` casa dentro de "desconectar" e desconexao nao esta
+implementada (cai na IA).
 
 Variaveis de ambiente adicionais no processo do n8n:
 
 - `RECEIPT_WORKFLOW_WEBHOOK_URL` (webhook do `receipt-ocr-classification`)
+- `SUPABASE_SECRET_KEY_SB_FORMAT` (ja usada pelo node do dossie; o node
+  `Edge - Gerar Link Conectar Banco` usa a mesma chave, no mesmo formato
+  `sb_secret_...`)
 
 O lookup de `usuario_id` segue o mesmo padrao do outro workflow: consulta
 `sessoes_whatsapp` por `session_id` (nao por `wa_id`) e falha explicitamente

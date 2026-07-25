@@ -1,19 +1,15 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+// A verificacao do token HMAC saiu daqui para _shared na Fase 10, quando a
+// pluggy-connect-token e a pluggy-item-link passaram a precisar da mesma
+// checagem. Mesmo codigo, um lugar so.
+import { type BootstrapTokenPayload, verifyBootstrapToken } from "../_shared/bootstrap_token.ts";
 
 type BootstrapRequest = {
   token: string;
   email: string;
   cpf: string;
   nome?: string;
-};
-
-type BootstrapTokenPayload = {
-  wa_id: string;
-  phone: string;
-  session_id: string;
-  exp: number;
-  nonce: string;
 };
 
 const jsonHeaders = { "content-type": "application/json" };
@@ -162,25 +158,6 @@ async function upsertUsuario(input: {
   }
 }
 
-async function verifyBootstrapToken(token: string): Promise<BootstrapTokenPayload> {
-  const [encodedPayload, signature] = token?.split(".") ?? [];
-  if (!encodedPayload || !signature) {
-    throw new Error("invalid_or_expired_token");
-  }
-
-  const expected = await hmacSha256(env("TAXMIND_BOOTSTRAP_SECRET"), encodedPayload);
-  if (!timingSafeEqual(signature, expected)) {
-    throw new Error("invalid_or_expired_token");
-  }
-
-  const payload = JSON.parse(base64UrlDecode(encodedPayload)) as BootstrapTokenPayload;
-  if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) {
-    throw new Error("invalid_or_expired_token");
-  }
-
-  return payload;
-}
-
 function normalizeEmail(email: string) {
   return email?.trim().toLowerCase() ?? "";
 }
@@ -209,51 +186,6 @@ async function hashCpf(normalizedCpf: string) {
     throw new Error("missing_cpf_hash_pepper");
   }
   return await sha256(`${pepper}:${normalizedCpf}`);
-}
-
-async function hmacSha256(secret: string, message: string) {
-  if (!secret) {
-    throw new Error("missing_bootstrap_secret");
-  }
-
-  const key = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    new TextEncoder().encode(message),
-  );
-  return base64UrlEncode(signature);
-}
-
-function base64UrlEncode(value: ArrayBuffer) {
-  const bytes = new Uint8Array(value);
-  const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-}
-
-function base64UrlDecode(value: string) {
-  const base64 = value.replaceAll("-", "+").replaceAll("_", "/");
-  const padded = base64.padEnd(base64.length + ((4 - base64.length % 4) % 4), "=");
-  const binary = atob(padded);
-  return new TextDecoder().decode(Uint8Array.from(binary, (char) => char.charCodeAt(0)));
-}
-
-function timingSafeEqual(a: string, b: string) {
-  const left = new TextEncoder().encode(a);
-  const right = new TextEncoder().encode(b);
-  if (left.length !== right.length) return false;
-
-  let diff = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    diff |= left[index] ^ right[index];
-  }
-  return diff === 0;
 }
 
 function corsHeaders() {

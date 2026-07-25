@@ -31,6 +31,53 @@ export async function probeBootstrapToken(token) {
   return { valid: true }
 }
 
+// Fase 10 — Open Finance.
+//
+// Aqui nao existe o passo de "sondar o token" separado: a propria
+// pluggy-connect-token so devolve o Connect Token do Pluggy depois de validar
+// o token HMAC e confirmar que o telefone tem cadastro concluido. Uma chamada
+// resolve as duas coisas, e cada codigo de erro tem um significado proprio:
+//   401 -> token invalido ou expirado
+//   403 -> token valido, mas o cadastro ainda nao foi concluido
+export async function fetchPluggyConnectToken(token) {
+  const { data, error } = await supabase.functions.invoke('pluggy-connect-token', {
+    body: { token },
+  })
+
+  if (error) {
+    const status = error.context?.status
+    const falha = new Error(
+      status === 403
+        ? 'Seu cadastro ainda não foi concluído.'
+        : 'Não foi possível iniciar a conexão bancária agora.',
+    )
+    falha.status = status
+    throw falha
+  }
+
+  if (!data?.accessToken) {
+    throw new Error('Não foi possível iniciar a conexão bancária agora.')
+  }
+
+  return data.accessToken
+}
+
+// Grava o vinculo item do Pluggy -> usuario. Sem isso, o webhook do Pluggy
+// recebe as transacoes e nao sabe de quem elas sao.
+export async function linkPluggyItem({ token, itemId }) {
+  const { data, error } = await supabase.functions.invoke('pluggy-item-link', {
+    body: { token, item_id: itemId },
+  })
+
+  if (error || !data?.ok) {
+    const falha = new Error('Conta conectada, mas o vínculo com sua conta TaxMind falhou.')
+    falha.status = error?.context?.status
+    throw falha
+  }
+
+  return data
+}
+
 export async function submitOnboardingProfile({ token, nome, email, cpf }) {
   const { data, error } = await supabase.functions.invoke('bootstrap-identity', {
     body: { token, nome, email, cpf },
