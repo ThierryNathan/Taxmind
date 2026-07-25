@@ -154,7 +154,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ contents: [ { role: \"user\", parts: [ { text: $json.system_prompt + \"\\n\\nLegenda enviada pelo usuário: \" + ($json.media_caption || \"sem legenda\") }, { inline_data: { mime_type: $json.media_mime_type, data: $json.base64_data } } ] } ], generationConfig: { temperature: 0.2, maxOutputTokens: 1200 } }) }}",
+        "jsonBody": "={{ JSON.stringify({\n  contents: [\n    {\n      role: \"user\",\n      parts: [\n        { text: $json.system_prompt + \"\\n\\nLegenda enviada pelo usuário: \" + ($json.media_caption || \"sem legenda\") },\n        { inline_data: { mime_type: $json.media_mime_type, data: $json.base64_data } }\n      ]\n    }\n  ],\n  generationConfig: {\n    temperature: 0.2,\n    maxOutputTokens: 16384,\n    thinkingConfig: { thinkingLevel: \"low\" }\n  }\n}) }}",
         "options": {}
       },
       "id": "e5d3221a-6549-4e13-be3b-c2af28cb4752",
@@ -190,7 +190,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ contents: [ { role: \"user\", parts: [ { text: $json.system_prompt + \"\\n\\nMensagem do usuário: \" + $json.text_body } ] } ], generationConfig: { temperature: 0.2, maxOutputTokens: 4096 } }) }}",
+        "jsonBody": "={{ JSON.stringify({\n  contents: [\n    {\n      role: \"user\",\n      parts: [\n        { text: $json.system_prompt + \"\\n\\nMensagem do usuário: \" + $json.text_body }\n      ]\n    }\n  ],\n  generationConfig: {\n    temperature: 0.2,\n    maxOutputTokens: 4096,\n    thinkingConfig: { thinkingLevel: \"low\" }\n  }\n}) }}",
         "options": {}
       },
       "id": "67d533b2-5d4e-44a5-a7cc-7e9bad6b1585",
@@ -603,7 +603,7 @@
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "bf94cc7d-6e6a-4d02-a850-5258d7f2a8ef",
+  "versionId": "ef1ee27c-ff3e-49b5-8f77-3c4b35faedc9",
   "meta": {
     "instanceId": "1f30e69034394336460f691b1eabbafddbdb2184a162149d350887b589d5a76c"
   },

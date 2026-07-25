@@ -152,7 +152,7 @@ async function upsertUsuario(input: {
       email: input.email,
       telefone_whatsapp: input.telefoneWhatsapp,
       cpf_hash: input.cpfHash,
-      onboarding_concluido: false,
+      onboarding_concluido: true,
       consentimento_lgpd_em: null,
     }, { onConflict: "id" });
 

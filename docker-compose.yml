@@ -14,6 +14,8 @@ services:
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
       - WHATSAPP_ACCESS_TOKEN=${WHATSAPP_ACCESS_TOKEN}
       - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
+      - RECEIPT_WORKFLOW_WEBHOOK_URL=http://localhost:5678/webhook/receipt-ocr-classification
+      - SUPABASE_SECRET_KEY_SB_FORMAT=${SUPABASE_SECRET_KEY_SB_FORMAT}
     volumes:
       - n8n_data:/home/node/.n8n
 

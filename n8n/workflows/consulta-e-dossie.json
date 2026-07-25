@@ -1,0 +1,655 @@
+{
+  "name": "consulta-e-dossie",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "consulta-dossie",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Webhook - Mensagem de Texto",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -820,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const body = $input.item.json.body;\nconst normalized = body.normalized || {};\nconst texto = normalized.text_body || \"\";\n\n// Casa palavra-chave sem depender de acento nem de caixa.\nconst alvo = texto\n  .normalize(\"NFD\")\n  .replace(/[\\u0300-\\u036f]/g, \"\")\n  .toLowerCase();\n\nconst contem = (termos) => termos.some((t) => alvo.includes(t));\n\n// Precedencia: o dossie e checado antes do resumo de proposito. \"resumo\" e\n// palavra comum e apareceria em \"manda o resumo em pdf\", onde a intencao real\n// e o arquivo. Os termos de dossie sao mais especificos, entao ganham.\nlet intent = null;\nif (contem([\"dossie\", \"relatorio\", \"pdf\", \"exportar\"])) {\n  intent = \"exportar_dossie\";\n} else if (contem([\"resumo\", \"extrato\", \"quanto tenho\"])) {\n  intent = \"consulta_resumo\";\n}\n\nreturn {\n  json: {\n    session_id: body.session_id || null,\n    message_type: normalized.message_type || null,\n    text_body: normalized.text_body || null,\n    wa_id: normalized.wa_id,\n    phone: normalized.phone,\n    profile_name: normalized.profile_name || null,\n    intent,\n  },\n};"
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Preparar Contexto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/sessoes_whatsapp",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "select",
+              "value": "usuario_id"
+            },
+            {
+              "name": "id",
+              "value": "=eq.{{ $json.session_id }}"
+            },
+            {
+              "name": "limit",
+              "value": "1"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Supabase - Buscar usuario_id da Sessão",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -420,
+        300
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ctx = $('Preparar Contexto').item.json;\nconst resposta = $input.item.json;\n\n// O PostgREST devolve array; o node HTTP pode ja ter desmembrado em item unico.\nconst linha = Array.isArray(resposta) ? resposta[0] : resposta;\nconst usuarioId = linha && linha.usuario_id ? linha.usuario_id : null;\n\n// Mesma postura do outro workflow: falhar explicitamente e melhor do que gravar\n// ou responder com vinculo errado quando o onboarding nao foi concluido.\nif (!usuarioId) {\n  throw new Error(\n    \"Sessao \" + ctx.session_id + \" sem usuario_id vinculado: onboarding nao concluido.\"\n  );\n}\n\nreturn { json: { ...ctx, usuario_id: usuarioId } };"
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Montar Contexto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-intent-por-palavra-chave",
+              "leftValue": "={{ $json.intent }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Intent Detectado?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ contents: [ { role: \"user\", parts: [ { text: \"Classifique a mensagem do usuario em exatamente uma destas categorias: registro_despesa, consulta_resumo, exportar_dossie, outro. Responda APENAS a categoria, sem explicacao. Mensagem: \" + ($json.text_body || \"\") } ] } ], generationConfig: { temperature: 0, maxOutputTokens: 512, thinkingConfig: { thinkingLevel: \"low\" } } }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Gemini - Classificar Intent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ctx = $('Montar Contexto').item.json;\nconst resposta = $input.item.json;\n\nconst bruto = ((((resposta || {}).candidates || [])[0] || {}).content?.parts?.[0]?.text || \"\")\n  .toLowerCase()\n  .replace(/[^a-z_]/g, \"\");\n\nconst validos = [\"registro_despesa\", \"consulta_resumo\", \"exportar_dossie\", \"outro\"];\n\n// Gemini 3 Flash nao permite desligar thinking (so thinkingLevel minimal/low/\n// medium/high). Se o thinking consumir o maxOutputTokens, o texto volta vazio.\n// Cair em \"outro\" mantem o fluxo vivo com a mensagem de ajuda, em vez de\n// derrubar a execucao com intent indefinido.\nconst intent = validos.find((v) => bruto.includes(v)) || \"outro\";\n\nreturn { json: { ...ctx, intent } };"
+      },
+      "id": "a1000000-0000-4000-8000-000000000007",
+      "name": "Aplicar Intent da IA",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "rule-registro-despesa",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "registro_despesa",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "registro_despesa"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "rule-consulta-resumo",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "consulta_resumo",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "consulta_resumo"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "rule-exportar-dossie",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "exportar_dossie",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "exportar_dossie"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "rule-outro",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "outro",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "outro"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "Switch por Intent",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        620,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.RECEIPT_WORKFLOW_WEBHOOK_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Webhook - Mensagem de Texto').item.json.body) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000009",
+      "name": "HTTP - Encaminhar para Fluxo de Recibo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/resumo_fiscal_usuario",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_usuario_id: $json.usuario_id }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-00000000000a",
+      "name": "Supabase - RPC Resumo Fiscal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        220
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('Montar Contexto').first().json;\nconst linhas = $input.all().map((i) => i.json);\n\nconst emojiPorCategoria = {\n  SAUDE: \"\\u{1F3E5}\",\n  EDUCACAO: \"\\u{1F393}\",\n  ALIMENTACAO: \"\\u{1F37D}\\u{FE0F}\",\n  TRANSPORTE: \"\\u{1F697}\",\n  MORADIA: \"\\u{1F3E0}\",\n  ESCRITORIO: \"\\u{1F5C2}\\u{FE0F}\",\n  EQUIPAMENTOS: \"\\u{1F5A5}\\u{FE0F}\",\n  SOFTWARE: \"\\u{1F4BE}\",\n  INTERNET_TELEFONIA: \"\\u{1F4F6}\",\n  SERVICOS_PROFISSIONAIS: \"\\u{1F4BC}\",\n  IMPOSTOS_TAXAS: \"\\u{1F9FE}\",\n  OUTROS: \"\\u{1F4CC}\",\n};\n\nconst brl = (v) =>\n  Number(v || 0).toLocaleString(\"pt-BR\", { style: \"currency\", currency: \"BRL\" });\n\nconst validas = linhas.filter((l) => l && l.categoria);\n\nif (validas.length === 0) {\n  return {\n    json: {\n      ...ctx,\n      mensagem:\n        \"Voce ainda nao tem despesas registradas. Manda a foto de um cupom ou descreve a despesa por texto que eu registro pra voce.\",\n    },\n  };\n}\n\nlet totalGeral = 0;\nlet totalDedutivel = 0;\nlet totalPendente = 0;\n\nconst blocos = validas.map((l) => {\n  totalGeral += Number(l.total || 0);\n  totalDedutivel += Number(l.total_dedutivel || 0);\n  totalPendente += Number(l.pendente_revisao || 0);\n\n  const emoji = emojiPorCategoria[l.categoria] || emojiPorCategoria.OUTROS;\n  const nome =\n    l.categoria.charAt(0) + l.categoria.slice(1).toLowerCase().split(\"_\").join(\" \");\n  return emoji + \" \" + nome + \": \" + brl(l.total) + \" (\" + l.quantidade + \")\";\n});\n\nconst partes = [\n  \"*Seu resumo fiscal*\",\n  blocos.join(\"\\n\"),\n  \"*Total:* \" + brl(totalGeral),\n  \"*Dedutivel:* \" + brl(totalDedutivel),\n];\n\nif (totalPendente > 0) {\n  partes.push(\n    \"\\u{23F3} \" +\n      totalPendente +\n      (totalPendente === 1 ? \" lancamento aguarda\" : \" lancamentos aguardam\") +\n      \" revisao humana.\"\n  );\n}\n\npartes.push(\"Quer o PDF completo? Manda *dossie*.\");\n\nreturn { json: { ...ctx, mensagem: partes.join(\"\\n\\n\") } };"
+      },
+      "id": "a1000000-0000-4000-8000-00000000000b",
+      "name": "Formatar Resumo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $json.phone, type: \"text\", text: { body: $json.mensagem } }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-00000000000c",
+      "name": "WhatsApp - Enviar Resumo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1300,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/functions/v1/generate-dossier",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ usuario_id: $json.usuario_id }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-00000000000d",
+      "name": "Edge - Gerar Dossiê",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $('Montar Contexto').item.json.phone, type: \"document\", document: { link: $json.url, filename: $json.filename, caption: \"Seu dossie fiscal do TaxMind. O link expira em 1 hora.\" } }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-00000000000e",
+      "name": "WhatsApp - Enviar Dossiê",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $json.phone, type: \"text\", text: { body: \"Posso registrar despesas (manda foto do cupom ou descreve por texto), mostrar seu resumo fiscal (manda 'resumo') ou gerar seu dossie em PDF (manda 'dossie').\" } }) }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-00000000000f",
+      "name": "WhatsApp - Enviar Ajuda",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        560
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Mensagem de Texto": {
+      "main": [
+        [
+          {
+            "node": "Preparar Contexto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Contexto": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Buscar usuario_id da Sessão",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Buscar usuario_id da Sessão": {
+      "main": [
+        [
+          {
+            "node": "Montar Contexto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Contexto": {
+      "main": [
+        [
+          {
+            "node": "Intent Detectado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intent Detectado?": {
+      "main": [
+        [
+          {
+            "node": "Switch por Intent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gemini - Classificar Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Classificar Intent": {
+      "main": [
+        [
+          {
+            "node": "Aplicar Intent da IA",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aplicar Intent da IA": {
+      "main": [
+        [
+          {
+            "node": "Switch por Intent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch por Intent": {
+      "main": [
+        [
+          {
+            "node": "HTTP - Encaminhar para Fluxo de Recibo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Supabase - RPC Resumo Fiscal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edge - Gerar Dossiê",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WhatsApp - Enviar Ajuda",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - RPC Resumo Fiscal": {
+      "main": [
+        [
+          {
+            "node": "Formatar Resumo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Formatar Resumo": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Enviar Resumo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edge - Gerar Dossiê": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Enviar Dossiê",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "b7c1e2f0-0000-4000-8000-0000000000a1",
+  "meta": {},
+  "id": "consulta-e-dossie",
+  "tags": []
+}

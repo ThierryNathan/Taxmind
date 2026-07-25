@@ -55,6 +55,15 @@ type BootstrapTokenPayload = {
   nonce: string;
 };
 
+// "error" existe separado de "not_found" de proposito: so "not_found" dispara
+// o onboarding. Falha de consulta cai no fluxo normal (n8n), porque mandar
+// link de onboarding para quem ja tem cadastro confunde o usuario e permite
+// reescrever o cadastro existente.
+type UsuarioLookup =
+  | { status: "found"; usuarioId: string }
+  | { status: "not_found" }
+  | { status: "error" };
+
 const jsonHeaders = { "content-type": "application/json" };
 
 const env = (name: string, fallback = "") => Deno.env.get(name) ?? fallback;
@@ -85,28 +94,35 @@ serve(async (request) => {
     const events = extractInboundMessages(payload);
 
     for (const event of events) {
-      const sessionId = await upsertWhatsAppSession(event);
+      // O roteamento depende de existir cadastro para o telefone, nao de
+      // detectar saudacao: o primeiro contato pode ser uma foto de recibo.
+      const usuario = await findUsuarioByWhatsAppPhone(event.normalized.phone);
+      const sessionId = await upsertWhatsAppSession(event, usuario);
 
-      if (event.message.type === "text" && isGreeting(event.message.text?.body ?? "")) {
+      if (usuario.status === "not_found") {
         const onboardingUrl = await createOnboardingUrl(event);
         await sendWhatsAppText(
           event.message.from,
           [
             `Oi, ${event.profileName ?? "tudo bem"}! Sou o TaxMind.`,
-            "Para proteger seus dados fiscais, preciso confirmar seu e-mail e CPF em um ambiente seguro.",
+            "Para proteger seus dados fiscais, preciso confirmar seu e-mail e CPF em um ambiente seguro antes de guardar qualquer recibo.",
             `Comece por aqui: ${onboardingUrl}`,
+            "Assim que terminar, e so voltar aqui e me mandar seus recibos.",
           ].join("\n\n"),
         );
         continue;
       }
 
-      await forwardToN8n({
-        source: "whatsapp-cloud-api",
-        event_type: "inbound_message",
-        session_id: sessionId,
-        normalized: event.normalized,
-        raw_value: event.value,
-      });
+      await forwardToN8n(
+        {
+          source: "whatsapp-cloud-api",
+          event_type: "inbound_message",
+          session_id: sessionId,
+          normalized: event.normalized,
+          raw_value: event.value,
+        },
+        resolveN8nWebhookUrl(event.normalized.message_type),
+      );
     }
 
     return json({ ok: true, processed: events.length });
@@ -173,17 +189,41 @@ function extractInboundMessages(payload: any) {
   return events;
 }
 
-async function upsertWhatsAppSession(event: InboundEvent): Promise<string | null> {
+// usuarios.telefone_whatsapp e a fonte da verdade do cadastro: so a
+// bootstrap-identity escreve nela, e exatamente quando o onboarding conclui.
+// Nao usamos sessoes_whatsapp.usuario_id para essa deteccao porque sessao
+// expira em 24h e a sessao nova nasce sem vinculo, o que faria um usuario
+// cadastrado ser tratado como novo a cada dia.
+async function findUsuarioByWhatsAppPhone(phone: string): Promise<UsuarioLookup> {
+  const { data, error } = await supabase
+    .from("usuarios")
+    .select("id")
+    .eq("telefone_whatsapp", phone)
+    .maybeSingle();
+
+  if (error) {
+    console.error("failed to lookup usuario by phone", error);
+    return { status: "error" };
+  }
+
+  return data?.id ? { status: "found", usuarioId: data.id } : { status: "not_found" };
+}
+
+async function upsertWhatsAppSession(
+  event: InboundEvent,
+  usuario: UsuarioLookup,
+): Promise<string | null> {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000);
   const phone = normalizeBrazilianPhone(event.message.from);
+  const usuarioId = usuario.status === "found" ? usuario.usuarioId : null;
   const incomingContext = {
     profile_name: event.profileName ?? null,
     last_message_id: event.message.id,
     last_message_type: event.message.type,
     last_inbound_text: event.message.text?.body ?? null,
     last_media_id: event.normalized.media_id,
-    onboarding_started: event.message.type === "text" && isGreeting(event.message.text?.body ?? ""),
+    onboarding_pendente: usuario.status === "not_found",
   };
 
   const { data: sessions, error: selectError } = await supabase
@@ -201,18 +241,27 @@ async function upsertWhatsAppSession(event: InboundEvent): Promise<string | null
 
   const existingSession = sessions?.[0];
   if (existingSession) {
+    const updatePayload: Record<string, unknown> = {
+      telefone_whatsapp: phone,
+      ultima_mensagem_id: event.message.id,
+      ultima_interacao_em: now.toISOString(),
+      expira_em: expiresAt.toISOString(),
+      contexto: {
+        ...(existingSession.contexto ?? {}),
+        ...incomingContext,
+      },
+    };
+
+    // O n8n le sessoes_whatsapp.usuario_id para gravar o recibo, entao o
+    // vinculo precisa existir na sessao. So gravamos quando temos um id de
+    // fato: escrever null aqui apagaria o vinculo feito pela bootstrap-identity.
+    if (usuarioId) {
+      updatePayload.usuario_id = usuarioId;
+    }
+
     const { error: updateError } = await supabase
       .from("sessoes_whatsapp")
-      .update({
-        telefone_whatsapp: phone,
-        ultima_mensagem_id: event.message.id,
-        ultima_interacao_em: now.toISOString(),
-        expira_em: expiresAt.toISOString(),
-        contexto: {
-          ...(existingSession.contexto ?? {}),
-          ...incomingContext,
-        },
-      })
+      .update(updatePayload)
       .eq("id", existingSession.id);
 
     if (updateError) {
@@ -225,6 +274,7 @@ async function upsertWhatsAppSession(event: InboundEvent): Promise<string | null
   const { data: inserted, error } = await supabase
     .from("sessoes_whatsapp")
     .insert({
+      usuario_id: usuarioId,
       telefone_whatsapp: phone,
       wa_id: event.waId,
       ultima_mensagem_id: event.message.id,
@@ -317,9 +367,22 @@ async function sendWhatsAppText(to: string, body: string) {
   }
 }
 
-async function forwardToN8n(payload: unknown) {
-  const n8nWebhookUrl = env("N8N_WEBHOOK_URL");
-  if (!n8nWebhookUrl) return;
+// Midia continua indo para o workflow de OCR/classificacao em N8N_WEBHOOK_URL,
+// exatamente como antes. Texto passa a ir para o workflow consulta-e-dossie,
+// que decide entre registro por texto, resumo e dossie — e reencaminha o
+// registro de despesa de volta para o workflow de recibo quando for o caso.
+function resolveN8nWebhookUrl(messageType: string) {
+  if (messageType === "image" || messageType === "document") {
+    return env("N8N_WEBHOOK_URL");
+  }
+  return env("N8N_TEXT_WEBHOOK_URL");
+}
+
+async function forwardToN8n(payload: unknown, n8nWebhookUrl: string) {
+  if (!n8nWebhookUrl) {
+    console.warn("n8n webhook url not configured for this message type; skipping forward");
+    return;
+  }
 
   const response = await fetch(n8nWebhookUrl, {
     method: "POST",
@@ -332,20 +395,10 @@ async function forwardToN8n(payload: unknown) {
   }
 }
 
-function isGreeting(text: string) {
-  return /^(oi|ola|hello|hi|bom dia|boa tarde|boa noite)\b/i.test(
-    removeDiacritics(text.trim()),
-  );
-}
-
 function getMedia(message: WhatsAppInboundMessage) {
   if (message.type === "image") return message.image;
   if (message.type === "document") return message.document;
   return null;
-}
-
-function removeDiacritics(value: string) {
-  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
 function normalizeBrazilianPhone(raw: string) {
