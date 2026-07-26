@@ -111,9 +111,19 @@ export function fetchItem(itemId: string): Promise<PluggyItem> {
   return pluggyGet<PluggyItem>(`/items/${itemId}`);
 }
 
+// Sem filtro de `type` de proposito: /accounts devolve conta corrente,
+// poupanca e cartao de credito na mesma lista, e a de cartao e justamente a que
+// mais rende despesa dedutivel. Confirmado no item sandbox, que responde 3
+// contas (BANK/SAVINGS_ACCOUNT, BANK/CHECKING_ACCOUNT, CREDIT/CREDIT_CARD).
 export async function fetchAccounts(itemId: string): Promise<PluggyAccount[]> {
   const data = await pluggyGet<{ results?: PluggyAccount[] }>("/accounts", { itemId });
   return data.results ?? [];
+}
+
+// Os eventos transactions/* identificam a conta, nao o item: buscar a lista
+// inteira so para achar uma conta seria uma consulta a mais por evento.
+export function fetchAccount(accountId: string): Promise<PluggyAccount> {
+  return pluggyGet<PluggyAccount>(`/accounts/${accountId}`);
 }
 
 // Pagina ate o fim.
@@ -143,6 +153,7 @@ export async function fetchTransactions(
   accountId: string,
   from?: string,
   to?: string,
+  createdAtFrom?: string,
 ): Promise<PluggyTransaction[]> {
   const transactions: PluggyTransaction[] = [];
 
@@ -150,6 +161,12 @@ export async function fetchTransactions(
   primeira.searchParams.set("accountId", accountId);
   if (from) primeira.searchParams.set("dateFrom", from);
   if (to) primeira.searchParams.set("dateTo", to);
+  // `createdAtFrom` filtra por quando a transacao entrou na base do Pluggy, nao
+  // pela data em que ela aconteceu — e o filtro certo para o evento
+  // transactions/created, cujo `transactionsCreatedAtFrom` vem nessa mesma
+  // dimensao. Usar `dateFrom` ali perderia compra antiga que so foi
+  // disponibilizada pelo banco agora, caso comum em fatura de cartao.
+  if (createdAtFrom) primeira.searchParams.set("createdAtFrom", createdAtFrom);
 
   let url: URL | null = primeira;
   let paginas = 0;
@@ -194,6 +211,41 @@ function proximaPagina(next: string | null | undefined, atual: URL): URL | null 
   }
 
   return proxima;
+}
+
+// O evento transactions/updated manda `transactionIds`, e nao ha filtro por
+// lista de ids em /v2/transactions (`?ids=` responde 400 exigindo accountId).
+// Sobra o GET unitario — e aqui vale a distincao que o `410` da colecao
+// esconde: `GET /transactions` (lista) esta desativado, mas
+// `GET /transactions/{id}` continua respondendo 200 com o objeto completo.
+// Verificado contra a API real, nao inferido da doc.
+//
+// Uma requisicao por id e aceitavel porque o evento e granular: chega com os
+// ids que mudaram naquela conta, tipicamente poucos. O teto existe para o caso
+// patologico de uma reconciliacao em massa.
+const IDS_MAX = 200;
+
+export async function fetchTransactionsByIds(ids: string[]): Promise<PluggyTransaction[]> {
+  const unicos = [...new Set(ids.filter(Boolean))].slice(0, IDS_MAX);
+  if (unicos.length < ids.length) {
+    console.warn("lista de transactionIds truncada ou com repetidos", {
+      recebidos: ids.length,
+      buscados: unicos.length,
+    });
+  }
+
+  const transactions: PluggyTransaction[] = [];
+  for (const id of unicos) {
+    try {
+      transactions.push(await pluggyGet<PluggyTransaction>(`/transactions/${id}`));
+    } catch (error) {
+      // Uma transacao que sumiu (id invalido, apagada entre o evento e a
+      // consulta) nao pode derrubar as outras do mesmo lote.
+      console.warn("falha ao buscar transacao por id; seguindo com as demais", { id, error });
+    }
+  }
+
+  return transactions;
 }
 
 async function safeText(response: Response) {

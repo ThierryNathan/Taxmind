@@ -11,9 +11,12 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { plainJson } from "../_shared/http.ts";
 import { supabaseAdmin } from "../_shared/onboarding_session.ts";
 import {
+  fetchAccount,
   fetchAccounts,
   fetchItem,
   fetchTransactions,
+  fetchTransactionsByIds,
+  type PluggyAccount,
   type PluggyTransaction,
 } from "../_shared/pluggy_api.ts";
 import { timingSafeEqual } from "../_shared/bootstrap_token.ts";
@@ -24,6 +27,11 @@ type PluggyWebhookPayload = {
   itemId?: string;
   error?: { code?: string; message?: string };
   triggeredBy?: string | null;
+  // Campos dos eventos transactions/*: eles sao por conta, nao por item.
+  accountId?: string;
+  transactionsCreatedAtFrom?: string;
+  transactionIds?: string[];
+  createdTransactionsLink?: string;
 };
 
 // EdgeRuntime e injetado pelo runtime do Supabase e nao existe no lib padrao
@@ -114,9 +122,162 @@ async function handleEvent(event: string, itemId: string, payload: PluggyWebhook
       await registrarErroDoItem(itemId, payload.error ?? {});
       return;
 
+    case "transactions/created":
+      await sincronizarTransacoesCriadas(itemId, payload);
+      return;
+
+    case "transactions/updated":
+      await sincronizarTransacoesAtualizadas(itemId, payload);
+      return;
+
+    case "transactions/deleted":
+      // Exclusao nao esta implementada: nao ha caminho de delete em
+      // recibos_evidencias e apagar evidencia fiscal e operacao com trilha de
+      // auditoria propria, nao efeito colateral de webhook. Registrado como
+      // limitacao conhecida no README de n8n/workflows.
+      console.warn("transactions/deleted recebido; exclusao nao implementada", {
+        itemId,
+        account_id: payload.accountId ?? null,
+        total: payload.transactionIds?.length ?? 0,
+      });
+      return;
+
     default:
       console.log("evento do pluggy ignorado", { event, itemId });
   }
+}
+
+/**
+ * transactions/created: o Pluggy avisa que chegaram transacoes novas numa conta
+ * especifica, com `transactionsCreatedAtFrom` e um `createdTransactionsLink`
+ * pronto.
+ *
+ * Por que nao usar o `createdTransactionsLink` direto: ele aponta para a
+ * colecao `/transactions`, que foi desativada e responde 410
+ * ENDPOINT_DEPRECATED. Remontar a consulta em /v2/transactions com o mesmo
+ * `accountId` + `createdAtFrom` da o mesmo resultado, reaproveita a paginacao
+ * ja escrita e nao segue URL vinda de fora com a X-API-KEY no header.
+ */
+async function sincronizarTransacoesCriadas(itemId: string, payload: PluggyWebhookPayload) {
+  const desde = payload.transactionsCreatedAtFrom;
+  if (!desde) {
+    console.warn("transactions/created sem transactionsCreatedAtFrom", { itemId });
+    return;
+  }
+
+  await processarTransacoesDaConta(
+    itemId,
+    payload.accountId ?? "",
+    "transactions/created",
+    (conta) => fetchTransactions(conta.id, undefined, undefined, desde),
+  );
+}
+
+/**
+ * transactions/updated: mesmo formato, porem com `transactionIds` no lugar da
+ * janela de criacao. O caso que mais importa aqui e a transacao de cartao que
+ * sai de PENDING para POSTED e pode ter mudado de valor.
+ */
+async function sincronizarTransacoesAtualizadas(itemId: string, payload: PluggyWebhookPayload) {
+  const ids = payload.transactionIds ?? [];
+  if (ids.length === 0) {
+    console.warn("transactions/updated sem transactionIds", { itemId });
+    return;
+  }
+
+  await processarTransacoesDaConta(
+    itemId,
+    payload.accountId ?? "",
+    "transactions/updated",
+    () => fetchTransactionsByIds(ids),
+  );
+}
+
+/**
+ * Tronco comum dos eventos transactions/*: resolve dono e conta, normaliza e
+ * entrega ao n8n **no mesmo envelope que item/updated ja usa**, para nao exigir
+ * mudanca no workflow openfinance-transacoes.
+ *
+ * `ultima_sincronizacao_em` de proposito nao e tocada aqui: ela e a janela do
+ * item inteiro e quem a move e o item/updated. Avanca-la a partir de um evento
+ * de uma conta so deixaria as outras contas com a janela adiantada, pulando
+ * transacao que ainda nao tinha chegado.
+ */
+async function processarTransacoesDaConta(
+  itemId: string,
+  accountId: string,
+  origem: string,
+  buscar: (conta: PluggyAccount) => Promise<PluggyTransaction[]>,
+) {
+  if (!accountId) {
+    console.warn("evento de transacoes sem accountId", { itemId, origem });
+    return;
+  }
+
+  const usuarioId = await resolveUsuarioIdDoItem(itemId);
+  if (!usuarioId) return;
+
+  const conta = await fetchAccount(accountId);
+
+  // A conta chega pelo corpo do webhook, que e forjavel quando
+  // PLUGGY_WEBHOOK_SECRET nao esta configurado. Sem esta conferencia, um evento
+  // com o item de um usuario e a conta de outro gravaria transacao alheia sob o
+  // usuario errado: o dono sai do itemId, os dados saem do accountId.
+  if (conta.itemId !== itemId) {
+    console.warn("accountId do evento nao pertence ao itemId; evento descartado", {
+      itemId,
+      account_id: accountId,
+      origem,
+    });
+    return;
+  }
+
+  const transacoes = await buscar(conta);
+  const normalizadas = [];
+  for (const transacao of transacoes) {
+    const normalizada = normalizarTransacao(transacao, itemId, usuarioId, conta);
+    if (normalizada) normalizadas.push(normalizada);
+  }
+
+  if (normalizadas.length === 0) {
+    console.log("evento de transacoes sem nada a encaminhar", {
+      itemId,
+      account_id: accountId,
+      origem,
+      recebidas: transacoes.length,
+    });
+    return;
+  }
+
+  console.log("transacoes encaminhadas ao n8n", {
+    itemId,
+    account_id: accountId,
+    conta_tipo: conta.type,
+    origem,
+    recebidas: transacoes.length,
+    encaminhadas: normalizadas.length,
+  });
+
+  await encaminharParaN8n({
+    source: "pluggy-open-finance",
+    event_type: "transacoes_sincronizadas",
+    usuario_id: usuarioId,
+    item_id: itemId,
+    // O workflow usa este campo como piso da consulta de deduplicacao e para o
+    // texto do periodo, e le como YYYY-MM-DD. Aqui nao existe janela de item,
+    // entao a data mais antiga do proprio lote e o piso correto: nao adianta
+    // procurar duplicata antes da transacao mais velha que chegou.
+    sincronizado_desde: pisoDeData(normalizadas),
+    total: normalizadas.length,
+    transacoes: normalizadas,
+  });
+}
+
+function pisoDeData(normalizadas: Array<{ data_despesa: string }>) {
+  return normalizadas
+    .map((t) => t.data_despesa)
+    .filter(Boolean)
+    .sort()[0] ?? null;
 }
 
 /**
@@ -203,7 +364,7 @@ async function sincronizarTransacoes(itemId: string) {
   for (const conta of contas) {
     const transacoes = await fetchTransactions(conta.id, from);
     for (const transacao of transacoes) {
-      const normalizada = normalizarTransacao(transacao, itemId, usuarioId, conta.name ?? null);
+      const normalizada = normalizarTransacao(transacao, itemId, usuarioId, conta);
       if (normalizada) normalizadas.push(normalizada);
     }
   }
@@ -232,19 +393,39 @@ async function sincronizarTransacoes(itemId: string) {
  * formato estavel, sem obrigar o workflow a conhecer o payload do Pluggy.
  *
  * Duas filtragens acontecem aqui:
- *   - CREDIT fora. Entrada de dinheiro (salario, transferencia recebida) nao e
- *     despesa dedutivel e nao tem o que classificar.
- *   - PENDING fora. Transacao pendente pode mudar de valor ou sumir, e a chave
- *     de deduplicacao (transaction_id) ja teria gravado a versao errada.
+ *   - `type: CREDIT` fora. Entrada de dinheiro (salario, transferencia
+ *     recebida, pagamento de fatura) nao e despesa dedutivel. Vale igual para
+ *     cartao: ali o `CREDIT` e o pagamento da fatura ou o estorno, e as compras
+ *     ja entram uma a uma.
+ *   - PENDING fora, **exceto em conta de cartao de credito**. Ver abaixo.
+ *
+ * Sobre PENDING e cartao. Em conta BANK, PENDING dura minutos e a transacao
+ * ainda pode mudar de valor, entao esperar o POSTED e barato. Em conta CREDIT e
+ * o oposto: a compra fica PENDING ate a fatura fechar, ou seja o ciclo inteiro
+ * corrente. Descartar PENDING ali apagava a maior parte das compras de cartao,
+ * e elas nao voltavam depois: a sincronizacao seguinte usa um `dateFrom` mais
+ * recente que a data da compra, entao a janela ja tinha passado por cima. No
+ * item sandbox isso derrubava 12 das 23 compras do cartao Dinners.
+ *
+ * O preco de aceitar PENDING e o valor poder ser ajustado depois da gravacao. O
+ * evento transactions/updated cobre esse caso reenviando a transacao ao n8n, e
+ * o registro sai daqui com `status_pluggy` para que a origem provisoria fique
+ * na trilha de auditoria.
+ *
+ * Nao ha normalizacao de sinal a fazer alem do Math.abs, mas convem saber por
+ * que ele nao e redundante: em conta BANK o DEBIT vem com `amount` negativo, em
+ * conta CREDIT o DEBIT vem positivo.
  */
 function normalizarTransacao(
   transacao: PluggyTransaction,
   itemId: string,
   usuarioId: string,
-  contaNome: string | null,
+  conta: PluggyAccount | null,
 ) {
   if (transacao.type !== "DEBIT") return null;
-  if (transacao.status && transacao.status === "PENDING") return null;
+
+  const ehCartao = conta?.type === "CREDIT";
+  if (!ehCartao && transacao.status === "PENDING") return null;
 
   const valor = Math.abs(Number(transacao.amount));
   if (!Number.isFinite(valor) || valor <= 0) return null;
@@ -254,7 +435,9 @@ function normalizarTransacao(
     item_id: itemId,
     transaction_id: transacao.id,
     account_id: transacao.accountId,
-    conta_nome: contaNome,
+    conta_nome: conta?.name ?? null,
+    conta_tipo: conta?.type ?? null,
+    status_pluggy: transacao.status ?? null,
     descricao: transacao.description || transacao.descriptionRaw || "Transacao bancaria",
     descricao_original: transacao.descriptionRaw ?? null,
     valor,

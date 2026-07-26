@@ -10,7 +10,7 @@ empacotados junto no deploy.
 | --- | --- |
 | `_shared/bootstrap_token.ts` | Assinatura e verificacao do token HMAC de sessao. Fonte unica: a `whatsapp-webhook` assina, a `bootstrap-identity`, a `pluggy-connect-token` e a `pluggy-item-link` verificam. |
 | `_shared/onboarding_session.ts` | Client `service_role` + `resolveUsuarioFromSessionToken`, que valida o token e exige `onboarding_concluido = true`. |
-| `_shared/pluggy_api.ts` | Cliente REST minimo do Pluggy (`/auth`, `/items`, `/accounts`, `/transactions`) com cache da apiKey. |
+| `_shared/pluggy_api.ts` | Cliente REST minimo do Pluggy (`/auth`, `/items`, `/accounts`, `/v2/transactions`) com cache da apiKey. |
 | `_shared/http.ts` | `corsHeaders` (origem fixa em `ONBOARDING_BASE_URL`) e helpers de resposta JSON. |
 
 Atencao ao mexer no `bootstrap_token.ts`: o formato do token e compativel com
@@ -42,8 +42,15 @@ todo link em transito.
 5. O widget conecta o banco. No `onSuccess`, a pagina chama `pluggy-item-link`,
    que confere o `clientUserId` do item e grava `open_finance_items`.
 6. O Pluggy dispara `item/updated` para `pluggy-webhook`, que responde 200 na
-   hora e, em background, busca as transacoes e as encaminha normalizadas para
-   `N8N_OPENFINANCE_WEBHOOK_URL`.
+   hora e, em background, busca as transacoes de **todas** as contas do item
+   (conta corrente, poupanca e cartao de credito) e as encaminha normalizadas
+   para `N8N_OPENFINANCE_WEBHOOK_URL`.
+7. A cada lote de transacoes novas o Pluggy dispara tambem `transactions/created`
+   (e `transactions/updated` quando alguma muda), eventos por conta e mais
+   granulares que o `item/updated`. A `pluggy-webhook` trata os dois e produz o
+   mesmo envelope, entao o workflow n8n nao distingue a origem. Contrato,
+   dimensao de data usada em cada evento e limitacoes conhecidas — incluindo
+   `transactions/deleted`, que **nao** remove nada — em `n8n/workflows/README.md`.
 
 Por que `pluggy-item-link` e uma function separada, e nao um evento sintetico
 na `pluggy-webhook`: a `pluggy-webhook` e publica e nao tem como exigir o token

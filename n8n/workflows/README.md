@@ -74,6 +74,8 @@ Formato encaminhado (um POST por sincronizacao, com todas as transacoes novas):
       "transaction_id": "...",
       "account_id": "...",
       "conta_nome": "Conta Corrente",
+      "conta_tipo": "BANK",
+      "status_pluggy": "POSTED",
       "descricao": "FARMACIA EXEMPLO",
       "descricao_original": "COMPRA CARTAO FARMACIA EXEMPLO",
       "valor": 87.4,
@@ -88,9 +90,66 @@ Formato encaminhado (um POST por sincronizacao, com todas as transacoes novas):
 }
 ```
 
-`valor` ja vem positivo e so transacoes `DEBIT` e nao pendentes sao
-encaminhadas: entrada de dinheiro nao e despesa dedutivel, e transacao pendente
-ainda pode mudar de valor depois de gravada.
+`valor` ja vem positivo e so transacoes `DEBIT` sao encaminhadas: entrada de
+dinheiro nao e despesa dedutivel. Em conta CREDIT o `DEBIT` tambem chega com
+`amount` positivo, ao contrario de conta BANK — a Edge Function normaliza o
+sinal antes de mandar.
+
+`status_pluggy` distingue `POSTED` de `PENDING`, e a regra de PENDING depende do
+tipo da conta:
+
+| `conta_tipo` | PENDING | Por que |
+| --- | --- | --- |
+| `BANK` | descartada | dura minutos e ainda pode mudar de valor; esperar o POSTED e barato |
+| `CREDIT` | **encaminhada** | numa fatura de cartao a compra fica PENDING ate o ciclo fechar; descartar apagaria a maior parte das compras do mes |
+
+Consequencia pratica para quem le `recibos_evidencias`: uma linha de cartao com
+`status_pluggy = "PENDING"` tem valor provisorio. Quando ela vira POSTED, o
+Pluggy dispara `transactions/updated` e a transacao e reenviada — mas a
+deduplicacao a trata como ja gravada e **o valor no banco nao e atualizado**.
+Ver limitacoes conhecidas no fim desta secao.
+
+### Eventos que produzem este payload
+
+A `pluggy-webhook` monta o **mesmo envelope** para quatro eventos do Pluggy, de
+proposito: assim o workflow nao precisa saber qual deles disparou.
+
+| Evento do Pluggy | Escopo | Como as transacoes sao buscadas |
+| --- | --- | --- |
+| `item/updated` | item inteiro | todas as contas do item, `dateFrom` = `ultima_sincronizacao_em` |
+| `transactions/created` | uma conta | `/v2/transactions` com `createdAtFrom` = `transactionsCreatedAtFrom` do evento |
+| `transactions/updated` | uma conta | `GET /transactions/{id}` para cada id de `transactionIds` |
+| `transactions/deleted` | uma conta | **nao implementado** (ver abaixo) |
+
+Nos eventos por conta, `sincronizado_desde` e a `data_despesa` mais antiga do
+proprio lote — nao existe janela de item ali, e esse valor e o piso correto para
+a consulta de deduplicacao. `ultima_sincronizacao_em` **nao** e avancada por
+evento de conta: ela e a janela do item inteiro, e move-la a partir de uma conta
+so faria as demais pularem transacao.
+
+Nota sobre `transactions/created`: o evento traz um `createdTransactionsLink`
+pronto, que a Edge Function **nao** usa. O link aponta para a colecao
+`/transactions`, desativada (410 `ENDPOINT_DEPRECATED`); a consulta e remontada
+em `/v2/transactions` com o mesmo `accountId` + `createdAtFrom`. Detalhe que nao
+da para trocar por conta propria: `createdAtFrom` filtra por quando o registro
+entrou na base do Pluggy, enquanto `dateFrom` filtra pela data da compra. Numa
+fatura de cartao as duas diferem por dias, e usar `dateFrom` com a janela do
+evento descarta exatamente a transacao que acabou de chegar.
+
+### Limitacoes conhecidas
+
+- **`transactions/deleted` nao remove nada.** O evento e recebido e registrado
+  em log, mas nao ha caminho de exclusao em `recibos_evidencias`. Uma transacao
+  que o banco estorne ou cancele depois de sincronizada **continua no dossie**.
+  Implementar exige decidir antes se a evidencia e apagada ou marcada como
+  cancelada — apagar registro fiscal e operacao com trilha de auditoria propria,
+  nao efeito colateral de webhook.
+- **`transactions/updated` nao atualiza valor.** O reenvio chega ao workflow,
+  mas a deduplicacao por `transaction_id` descarta a transacao como ja gravada.
+  Uma compra de cartao gravada em PENDING e depois ajustada pelo banco fica com
+  o valor antigo. Resolver isso exige trocar o insert
+  `resolution=ignore-duplicates` por um upsert, e ha o efeito colateral de
+  sobrescrever a classificacao ja revisada por humano.
 
 ## receipt-ocr-classification.json
 

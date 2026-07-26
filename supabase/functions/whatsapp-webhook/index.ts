@@ -9,6 +9,24 @@ import {
   signBootstrapToken,
   timingSafeEqual,
 } from "../_shared/bootstrap_token.ts";
+// Fase 7: a logica deterministica da re-verificacao (geracao, hash, janela de
+// 30 dias, expiracao, avaliacao do palpite) vive em _shared para ser testavel
+// sem subir esta function. Ver tests/verificacao_test.ts.
+import {
+  avaliarCodigo,
+  calcularExpiracaoCodigo,
+  type CodigoArmazenado,
+  CODIGO_DIGITOS,
+  CODIGO_TTL_MINUTOS,
+  codigoExpirado,
+  extrairCodigo,
+  gerarCodigoVerificacao,
+  hashCodigoVerificacao,
+  JANELA_CONFIANCA_DIAS,
+  mascararEmail,
+  MAX_TENTATIVAS,
+  precisaReverificar,
+} from "../_shared/verificacao.ts";
 
 type WhatsAppMedia = {
   id?: string;
@@ -61,9 +79,22 @@ type InboundEvent = {
 // link de onboarding para quem ja tem cadastro confunde o usuario e permite
 // reescrever o cadastro existente.
 type UsuarioLookup =
-  | { status: "found"; usuarioId: string }
+  | { status: "found"; usuarioId: string; email: string | null; criadoEm: string | null }
   | { status: "not_found" }
   | { status: "error" };
+
+// Resultado do portao de re-verificacao (Fase 7). "liberado" segue para o
+// roteamento existente; "bloqueado" para nesta mensagem, porque ela virou uma
+// etapa da conversa de verificacao.
+type PortaoVerificacao = "liberado" | "bloqueado";
+
+const TIPOS_EVENTO_ACESSO = {
+  codigoGerado: "CODIGO_VERIFICACAO_GERADO",
+  envioFalhou: "CODIGO_VERIFICACAO_ENVIO_FALHOU",
+  sucesso: "VERIFICACAO_SUCESSO",
+  falha: "VERIFICACAO_FALHA",
+  indisponivel: "VERIFICACAO_INDISPONIVEL",
+} as const;
 
 const jsonHeaders = { "content-type": "application/json" };
 
@@ -112,6 +143,19 @@ serve(async (request) => {
           ].join("\n\n"),
         );
         continue;
+      }
+
+      // Fase 7: camada adicional ANTES do roteamento, nao substituicao dele.
+      // Se a janela de confianca de 30 dias venceu, esta mensagem vira etapa
+      // da re-verificacao e nao segue para o n8n. Falha de infraestrutura aqui
+      // libera a mensagem (mesma logica do status "error" do lookup): perder
+      // recibo por indisponibilidade nossa e pior do que uma janela de
+      // confianca esticada.
+      if (usuario.status === "found") {
+        const portao = await aplicarPortaoDeVerificacao(event, usuario, sessionId);
+        if (portao === "bloqueado") {
+          continue;
+        }
       }
 
       await forwardToN8n(
@@ -195,10 +239,14 @@ function extractInboundMessages(payload: any) {
 // Nao usamos sessoes_whatsapp.usuario_id para essa deteccao porque sessao
 // expira em 24h e a sessao nova nasce sem vinculo, o que faria um usuario
 // cadastrado ser tratado como novo a cada dia.
+// email e criado_em entraram no select na Fase 7: o primeiro e o destino do
+// codigo de re-verificacao, o segundo e o fallback da janela de confianca para
+// quem concluiu o onboarding depois desta fase e ainda nao tem nenhuma sessao
+// com verificado_em gravado.
 async function findUsuarioByWhatsAppPhone(phone: string): Promise<UsuarioLookup> {
   const { data, error } = await supabase
     .from("usuarios")
-    .select("id")
+    .select("id, email, criado_em")
     .eq("telefone_whatsapp", phone)
     .maybeSingle();
 
@@ -207,7 +255,14 @@ async function findUsuarioByWhatsAppPhone(phone: string): Promise<UsuarioLookup>
     return { status: "error" };
   }
 
-  return data?.id ? { status: "found", usuarioId: data.id } : { status: "not_found" };
+  return data?.id
+    ? {
+      status: "found",
+      usuarioId: data.id,
+      email: data.email ?? null,
+      criadoEm: data.criado_em ?? null,
+    }
+    : { status: "not_found" };
 }
 
 async function upsertWhatsAppSession(
@@ -311,6 +366,417 @@ async function createOnboardingUrl(event: InboundEvent) {
   onboardingUrl.searchParams.set("token", token);
   onboardingUrl.searchParams.set("wa_id", event.waId);
   return onboardingUrl.toString();
+}
+
+// --- Fase 7: re-verificacao por e-mail -----------------------------------
+//
+// Portao aplicado a mensagem de usuario JA cadastrado. Devolve "liberado" para
+// seguir ao roteamento existente e "bloqueado" quando a mensagem foi consumida
+// pela conversa de verificacao.
+//
+// Fail open e proposital em toda falha de infraestrutura (consulta que erra,
+// insert que erra, usuario sem e-mail cadastrado): o pior caso de liberar e
+// uma janela de confianca esticada; o pior caso de bloquear e o usuario perder
+// o recibo e ficar sem caminho de saida no WhatsApp.
+type UsuarioVerificavel = Extract<UsuarioLookup, { status: "found" }>;
+
+async function aplicarPortaoDeVerificacao(
+  event: InboundEvent,
+  usuario: UsuarioVerificavel,
+  sessionId: string | null,
+): Promise<PortaoVerificacao> {
+  const ultima = await resolverUltimaVerificacao(usuario);
+  if (ultima.status === "error") {
+    return "liberado";
+  }
+
+  // Caminho da esmagadora maioria das mensagens: dentro da janela, nada muda.
+  if (!precisaReverificar(ultima.verificadoEm)) {
+    return "liberado";
+  }
+
+  const pendente = await buscarCodigoPendente(usuario.usuarioId);
+  if (pendente.status === "error") {
+    return "liberado";
+  }
+
+  if (pendente.codigo) {
+    const desfecho = await tratarCodigoPendente(event, usuario, pendente.codigo, sessionId);
+    if (desfecho !== "gerar_novo") {
+      return desfecho;
+    }
+  }
+
+  return await iniciarReverificacao(event, usuario, sessionId);
+}
+
+/**
+ * Ultima verificacao do USUARIO, nao da sessao atual.
+ *
+ * Ler verificado_em da sessao corrente daria falso negativo todo dia: sessao
+ * expira em 24h e a sessao nova nasce sem contexto (ver comentario de
+ * findUsuarioByWhatsAppPhone), entao a coluna viria null e a janela de 30 dias
+ * viraria uma janela de 24 horas. Por isso o maior verificado_em entre as
+ * sessoes do usuario, com fallback em usuarios.criado_em — que cobre quem
+ * concluiu o onboarding sem nenhuma sessao carimbada, sem exigir mudanca na
+ * bootstrap-identity.
+ */
+async function resolverUltimaVerificacao(
+  usuario: UsuarioVerificavel,
+): Promise<{ status: "ok"; verificadoEm: string | null } | { status: "error" }> {
+  const { data, error } = await supabase
+    .from("sessoes_whatsapp")
+    .select("verificado_em")
+    .eq("usuario_id", usuario.usuarioId)
+    .not("verificado_em", "is", null)
+    .order("verificado_em", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    console.error("failed to resolve ultima verificacao", error);
+    return { status: "error" };
+  }
+
+  return { status: "ok", verificadoEm: data?.[0]?.verificado_em ?? usuario.criadoEm };
+}
+
+type CodigoPendente = CodigoArmazenado & { id: string };
+
+async function buscarCodigoPendente(
+  usuarioId: string,
+): Promise<{ status: "ok"; codigo: CodigoPendente | null } | { status: "error" }> {
+  const { data, error } = await supabase
+    .from("codigos_verificacao")
+    .select("id, codigo_hash, expira_em, tentativas, max_tentativas, consumido_em, invalidado_em")
+    .eq("usuario_id", usuarioId)
+    .is("consumido_em", null)
+    .is("invalidado_em", null)
+    .order("criado_em", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    console.error("failed to lookup codigo de verificacao", error);
+    return { status: "error" };
+  }
+
+  return { status: "ok", codigo: (data?.[0] as CodigoPendente | undefined) ?? null };
+}
+
+// "gerar_novo" devolve o controle para aplicarPortaoDeVerificacao, que emite um
+// codigo novo. Codigo esgotado NAO gera novo aqui de proposito: quem erra tres
+// vezes precisa mandar outra mensagem para pedir, senao um chute em rajada
+// renovaria codigo indefinidamente e encheria a caixa de entrada do dono.
+async function tratarCodigoPendente(
+  event: InboundEvent,
+  usuario: UsuarioVerificavel,
+  codigo: CodigoPendente,
+  sessionId: string | null,
+): Promise<PortaoVerificacao | "gerar_novo"> {
+  const destino = mascararEmail(usuario.email);
+  const informado = event.normalized.message_type === "text"
+    ? extrairCodigo(event.normalized.text_body)
+    : null;
+
+  if (!informado) {
+    if (codigoExpirado(codigo.expira_em)) {
+      await invalidarCodigo(codigo.id, "EXPIRADO");
+      return "gerar_novo";
+    }
+
+    // Mensagem comum durante a verificacao: relembra sem gastar outro e-mail.
+    await sendWhatsAppText(event.message.from, [
+      `Antes de continuar, preciso confirmar que e voce mesmo: enviei um codigo de ${CODIGO_DIGITOS} digitos para ${destino}.`,
+      "Digite so o codigo aqui para eu liberar seu historico.",
+    ].join("\n\n"));
+    return "bloqueado";
+  }
+
+  const resultado = avaliarCodigo(codigo, await hashCodigoVerificacao(informado));
+
+  switch (resultado.status) {
+    case "valido": {
+      await consumirCodigo(codigo.id);
+      await marcarSessaoVerificada(sessionId);
+      await registrarEventoAcesso(usuario.usuarioId, TIPOS_EVENTO_ACESSO.sucesso, {
+        canal: "EMAIL",
+        destino_mascarado: destino,
+        sessao_whatsapp_id: sessionId,
+        codigo_id: codigo.id,
+        tentativas: codigo.tentativas,
+      });
+      await sendWhatsAppText(event.message.from, [
+        "Identidade confirmada, obrigado!",
+        "Pode seguir normalmente: me manda o recibo ou a pergunta que voce quer resolver agora.",
+      ].join("\n\n"));
+      // A mensagem que trouxe o codigo nao e despesa nem consulta: nada a
+      // encaminhar. A partir da proxima, o fluxo volta ao normal.
+      return "bloqueado";
+    }
+
+    case "invalido": {
+      await registrarTentativa(codigo.id, resultado.tentativas);
+      await registrarEventoAcesso(usuario.usuarioId, TIPOS_EVENTO_ACESSO.falha, {
+        motivo: "CODIGO_INCORRETO",
+        sessao_whatsapp_id: sessionId,
+        codigo_id: codigo.id,
+        tentativas: resultado.tentativas,
+        tentativas_restantes: resultado.tentativasRestantes,
+      });
+      await sendWhatsAppText(event.message.from, [
+        "Esse codigo nao confere.",
+        `Confira o e-mail enviado para ${destino} e tente de novo — voce tem ${resultado.tentativasRestantes} tentativa(s) restante(s).`,
+      ].join("\n\n"));
+      return "bloqueado";
+    }
+
+    case "esgotado": {
+      await invalidarCodigo(codigo.id, "TENTATIVAS_ESGOTADAS");
+      await registrarEventoAcesso(usuario.usuarioId, TIPOS_EVENTO_ACESSO.falha, {
+        motivo: "TENTATIVAS_ESGOTADAS",
+        sessao_whatsapp_id: sessionId,
+        codigo_id: codigo.id,
+      });
+      await sendWhatsAppText(event.message.from, [
+        "Esse codigo foi bloqueado por excesso de tentativas.",
+        "Me manda qualquer mensagem que eu envio um codigo novo para o seu e-mail.",
+      ].join("\n\n"));
+      return "bloqueado";
+    }
+
+    case "expirado": {
+      await invalidarCodigo(codigo.id, "EXPIRADO");
+      await sendWhatsAppText(
+        event.message.from,
+        `Esse codigo expirou (ele vale ${CODIGO_TTL_MINUTOS} minutos). Estou enviando um novo agora.`,
+      );
+      return "gerar_novo";
+    }
+
+    default:
+      // "indisponivel": o registro foi consumido ou invalidado por outra
+      // execucao entre a leitura e a avaliacao. Emite um codigo novo.
+      return "gerar_novo";
+  }
+}
+
+async function iniciarReverificacao(
+  event: InboundEvent,
+  usuario: UsuarioVerificavel,
+  sessionId: string | null,
+): Promise<PortaoVerificacao> {
+  if (!usuario.email) {
+    // Cadastro sem e-mail nao tem como ser re-verificado por este canal.
+    // Bloquear deixaria a conta inutilizavel sem saida pelo WhatsApp, entao
+    // libera e registra — o evento e o gancho para o motor de risco futuro.
+    console.warn("usuario sem e-mail cadastrado; re-verificacao indisponivel", {
+      usuario_id: usuario.usuarioId,
+    });
+    await registrarEventoAcesso(usuario.usuarioId, TIPOS_EVENTO_ACESSO.indisponivel, {
+      motivo: "SEM_EMAIL_CADASTRADO",
+      sessao_whatsapp_id: sessionId,
+    });
+    return "liberado";
+  }
+
+  const codigo = gerarCodigoVerificacao();
+  const expiraEm = calcularExpiracaoCodigo();
+  const destino = mascararEmail(usuario.email);
+
+  const { data: inserido, error } = await supabase
+    .from("codigos_verificacao")
+    .insert({
+      usuario_id: usuario.usuarioId,
+      sessao_whatsapp_id: sessionId,
+      canal: "EMAIL",
+      codigo_hash: await hashCodigoVerificacao(codigo),
+      destino_mascarado: destino,
+      tentativas: 0,
+      max_tentativas: MAX_TENTATIVAS,
+      expira_em: expiraEm.toISOString(),
+    })
+    .select("id")
+    .single();
+
+  if (error) {
+    // 23505 e a unique parcial de "um codigo ativo por usuario": duas
+    // mensagens chegaram juntas e a outra execucao ja emitiu o codigo. Nao
+    // manda segundo e-mail, so relembra.
+    if (error.code === "23505") {
+      await sendWhatsAppText(event.message.from, [
+        `Ja enviei um codigo de ${CODIGO_DIGITOS} digitos para ${destino}.`,
+        "Digite so o codigo aqui para continuar.",
+      ].join("\n\n"));
+      return "bloqueado";
+    }
+
+    console.error("failed to persist codigo de verificacao", error);
+    return "liberado";
+  }
+
+  const enviado = await enviarCodigoPorEmail(usuario.email, codigo);
+  if (!enviado) {
+    // Sem e-mail entregue o usuario nao tem como adivinhar o codigo: invalida
+    // para que a proxima mensagem gere outro em vez de cair na unique.
+    await invalidarCodigo(inserido.id, "ENVIO_FALHOU");
+    await registrarEventoAcesso(usuario.usuarioId, TIPOS_EVENTO_ACESSO.envioFalhou, {
+      canal: "EMAIL",
+      destino_mascarado: destino,
+      sessao_whatsapp_id: sessionId,
+      codigo_id: inserido.id,
+    });
+    await sendWhatsAppText(event.message.from, [
+      "Preciso confirmar sua identidade por e-mail, mas nao consegui enviar o codigo agora.",
+      "Tente novamente em alguns minutos — se persistir, fale com o suporte.",
+    ].join("\n\n"));
+    return "bloqueado";
+  }
+
+  await registrarEventoAcesso(usuario.usuarioId, TIPOS_EVENTO_ACESSO.codigoGerado, {
+    canal: "EMAIL",
+    destino_mascarado: destino,
+    sessao_whatsapp_id: sessionId,
+    codigo_id: inserido.id,
+    expira_em: expiraEm.toISOString(),
+    motivo: "JANELA_CONFIANCA_EXPIRADA",
+    janela_dias: JANELA_CONFIANCA_DIAS,
+  });
+
+  await sendWhatsAppText(event.message.from, [
+    `Faz mais de ${JANELA_CONFIANCA_DIAS} dias desde a ultima vez que confirmamos sua identidade, e seus dados fiscais ficam protegidos por essa checagem.`,
+    `Enviei um codigo de ${CODIGO_DIGITOS} digitos para ${destino}. Ele vale ${CODIGO_TTL_MINUTOS} minutos.`,
+    "Digite o codigo aqui e eu sigo com o que voce me mandou.",
+  ].join("\n\n"));
+
+  return "bloqueado";
+}
+
+async function marcarSessaoVerificada(sessionId: string | null) {
+  if (!sessionId) {
+    // Sessao nao gravada e falha de banco anterior. A verificacao ja foi
+    // consumida e registrada em eventos_acesso; o custo e a proxima mensagem
+    // pedir verificacao de novo.
+    console.error("verificacao aprovada sem sessao para carimbar verificado_em");
+    return;
+  }
+
+  const { error } = await supabase
+    .from("sessoes_whatsapp")
+    .update({ verificado_em: new Date().toISOString() })
+    .eq("id", sessionId);
+
+  if (error) {
+    console.error("failed to stamp verificado_em", error);
+  }
+}
+
+async function consumirCodigo(codigoId: string) {
+  const { error } = await supabase
+    .from("codigos_verificacao")
+    .update({ consumido_em: new Date().toISOString() })
+    .eq("id", codigoId);
+
+  if (error) {
+    console.error("failed to consume codigo de verificacao", error);
+  }
+}
+
+async function invalidarCodigo(codigoId: string, motivo: string) {
+  const { error } = await supabase
+    .from("codigos_verificacao")
+    .update({ invalidado_em: new Date().toISOString(), invalidado_motivo: motivo })
+    .eq("id", codigoId);
+
+  if (error) {
+    console.error("failed to invalidate codigo de verificacao", error);
+  }
+}
+
+async function registrarTentativa(codigoId: string, tentativas: number) {
+  const { error } = await supabase
+    .from("codigos_verificacao")
+    .update({ tentativas })
+    .eq("id", codigoId);
+
+  if (error) {
+    console.error("failed to record tentativa de verificacao", error);
+  }
+}
+
+// Trilha LGPD e insumo do motor de risco futuro. Nunca recebe codigo em claro
+// nem conteudo de mensagem: so identificadores, motivo e contadores. Falha de
+// gravacao aqui nao interrompe o fluxo — o log e observacional.
+async function registrarEventoAcesso(
+  usuarioId: string,
+  tipoEvento: string,
+  detalhes: Record<string, unknown>,
+) {
+  const { error } = await supabase
+    .from("eventos_acesso")
+    .insert({ usuario_id: usuarioId, tipo_evento: tipoEvento, detalhes });
+
+  if (error) {
+    console.error("failed to record evento de acesso", error);
+  }
+}
+
+/**
+ * Envia o codigo pela API do Resend.
+ *
+ * Chamada direta, e nao supabase.auth.admin: o generateLink da
+ * bootstrap-identity nao despacha e-mail (ele devolve action_link/email_otp
+ * para quem chama enviar), e o email_otp do Auth so se valida via verifyOtp,
+ * que cria sessao autenticada — semantica de login, nao de "confirme que ainda
+ * e voce neste WhatsApp". O codigo validado aqui e o nosso, guardado em
+ * codigos_verificacao. A configuracao de SMTP no dashboard continua servindo
+ * aos e-mails do proprio Auth (magic link do onboarding).
+ *
+ * O codigo nunca vai para log, nem em caso de erro.
+ */
+async function enviarCodigoPorEmail(email: string, codigo: string): Promise<boolean> {
+  const apiKey = env("RESEND_API_KEY");
+  const remetente = env("RESEND_FROM_EMAIL");
+
+  if (!apiKey || !remetente) {
+    console.error("RESEND_API_KEY ou RESEND_FROM_EMAIL nao configurados; codigo nao enviado");
+    return false;
+  }
+
+  const linhas = [
+    "Recebemos uma mensagem sua no WhatsApp do TaxMind.",
+    `Seu codigo de verificacao e: ${codigo}`,
+    `O codigo vale ${CODIGO_TTL_MINUTOS} minutos e serve apenas para confirmar sua identidade no WhatsApp.`,
+    "Se nao foi voce, ignore este e-mail e nao compartilhe o codigo com ninguem.",
+  ];
+
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        from: remetente,
+        to: [email],
+        subject: "TaxMind - codigo de verificacao",
+        text: linhas.join("\n\n"),
+        html: `<p>${linhas.join("</p><p>")}</p>`,
+      }),
+    });
+
+    if (!response.ok) {
+      console.error("failed to send verification email", {
+        status: response.status,
+        body: await response.text(),
+      });
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error("verification email request failed", error);
+    return false;
+  }
 }
 
 async function verifyMetaSignature(request: Request, rawBody: string) {
