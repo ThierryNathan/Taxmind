@@ -46,10 +46,8 @@ O contrato de payload e identico nos dois casos.
 ### Terceira origem: Open Finance (Fase 10)
 
 A `pluggy-webhook` encaminha transacoes bancarias para
-`N8N_OPENFINANCE_WEBHOOK_URL`, uma variavel separada das duas acima. O
-workflow consumidor **ainda nao existe** — a Edge Function ja publica, mas o
-proximo passo da fase e desenhar o workflow que classifica e grava essas
-transacoes em `recibos_evidencias` com `origem = 'OPEN_FINANCE'`.
+`N8N_OPENFINANCE_WEBHOOK_URL`, uma variavel separada das duas acima, consumida
+por `openfinance-transacoes.json`.
 
 Por que nao reaproveitar `N8N_TEXT_WEBHOOK_URL`: o `consulta-e-dossie` resolve
 `usuario_id` consultando `sessoes_whatsapp` por `session_id` e le
@@ -82,6 +80,7 @@ Formato encaminhado (um POST por sincronizacao, com todas as transacoes novas):
       "moeda": "BRL",
       "data_despesa": "2026-07-20",
       "categoria_pluggy": "Pharmacy",
+      "categoria_pluggy_id": "18020000",
       "estabelecimento": "Farmacia Exemplo",
       "documento_prestador": "00000000000000"
     }
@@ -165,3 +164,175 @@ Variaveis de ambiente adicionais no processo do n8n:
 O lookup de `usuario_id` segue o mesmo padrao do outro workflow: consulta
 `sessoes_whatsapp` por `session_id` (nao por `wa_id`) e falha explicitamente
 quando o vinculo nao existe.
+
+## openfinance-transacoes.json
+
+Webhook path: `openfinance-transacoes`. Consome o payload da `pluggy-webhook`,
+classifica fiscalmente e grava em `recibos_evidencias` com
+`origem = 'OPEN_FINANCE'` e **sem** `sessao_whatsapp_id` — nao existe conversa
+de WhatsApp nesta origem.
+
+> **Este arquivo ainda nao e um export vivo.** Ele foi escrito fora do n8n para
+> o primeiro import. A partir do momento em que for importado e salvo na
+> instancia, passa a carregar id de node, `webhookId`, `versionId` e ajustes de
+> UI, e vale a regra do `AGENTS.md`: **editar cirurgicamente, nunca regenerar
+> por script**. Regenerar depois do primeiro import descarta ajuste manual e faz
+> o import criar um workflow novo em vez de atualizar o existente.
+
+### Entrada
+
+Aceita as tres formas sem mudanca de logica downstream: o envelope com
+`transacoes: [...]` (o que a `pluggy-webhook` manda hoje), um array cru de
+transacoes, ou uma transacao solta no corpo. O node `Preparar Lote` normaliza
+os tres num item unico — de proposito, porque node HTTP roda uma vez por item
+de entrada e fanar antes dos lookups viraria N consultas identicas ao Supabase.
+
+### Resolucao de usuario_id
+
+O payload **ja chega com `usuario_id` resolvido**: a `pluggy-webhook` faz esse
+trabalho antes de encaminhar (`open_finance_items`, com backfill pelo
+`clientUserId` do item). O node `Supabase - Resolver Item e Usuario` existe por
+dois outros motivos: e o fallback quando o campo nao vem (payload montado a
+mao, replay de evento antigo) e e de onde saem o `connector_nome` e o
+`telefone_whatsapp` — o payload nao carrega telefone e sem ele nao ha para onde
+mandar o resumo. Usa recurso embutido do PostgREST
+(`select=usuario_id,connector_nome,usuarios(telefone_whatsapp)`) para resolver
+tudo numa consulta so.
+
+### Pre-filtro por categoria da Pluggy
+
+Antes de chamar o Gemini, o node `Montar Fila de Transacoes` tenta resolver a
+transacao so pela categoria do agregador. O que casa vira `NAO_DEDUTIVEL` com
+`confidence_score` 0.95 e `requer_revisao_humana` false, sem chamada de IA.
+
+O casamento e por **`categoria_pluggy_id`** (ex.: `18020000`), nao pelo rotulo
+em ingles: o id e hierarquico (2 primeiros digitos = categoria de topo, 4
+primeiros = subcategoria) e estavel, enquanto `category` e texto de exibicao
+que a Pluggy pode renomear sem quebrar contrato. A taxonomia completa (130
+categorias) sai de `GET https://api.pluggy.ai/categories`.
+
+**Principio da lista: falso negativo e pior que chamada de IA desperdicada.**
+Descartar algo dedutivel some em silencio do dossie do usuario; uma chamada
+extra ao Gemini custa centavos. Por isso **o default e mandar para a IA** —
+categoria nula, id ausente, categoria ambigua ou categoria nova que a Pluggy
+venha a criar caem todas no caminho da IA. So o que esta na tabela abaixo e
+descartado.
+
+| Prefixo do id | Categoria Pluggy | Motivo |
+| --- | --- | --- |
+| `04` | Same person transfer (CASH/PIX/TED) | transferencia entre contas do proprio titular: nao e despesa |
+| `05060000` | Transfer - Internal | idem |
+| `05100000` | Credit card payment | pagamento de fatura; as compras do cartao ja entram uma a uma, contar a fatura duplicaria |
+| `01` | Income | entrada de dinheiro |
+| `03` | Investments | aplicacao ou resgate, nao despesa |
+| `08090000` | Cashback | bonificacao recebida |
+| `08` (menos `08080000`) | Shopping | consumo pessoal |
+| `09` | Digital services | jogo e streaming |
+| `10` | Groceries | supermercado |
+| `11` | Food and drinks | restaurante, bar, delivery |
+| `12030000` | Mileage programs | pontuacao, nao despesa |
+| `14` | Gambling | nunca dedutivel |
+| `21` | Leisure | nunca dedutivel |
+| `0703` | Wellness and fitness | academia nao e dedutivel no IRPF |
+| `0704` | Tickets | estadio, museu, cinema, teatro |
+
+Excecao explicita: **`08080000` Office supplies** fica dentro de `08` mas vai
+para a IA — material de escritorio pode entrar no livro-caixa do autonomo.
+
+Vao **sempre** para o Gemini, entre outras: `18` Healthcare inteiro,
+`200300000` Health insurance, `0702` Education, `02030003` Student loan,
+`06020000` Alimony, `15` Taxes, `16` Bank fees, `0701` Telecommunications,
+`17` Housing, `19` Transportation, `12` Travel (viagem a trabalho e
+livro-caixa), `0509` transferencias a terceiros (PIX para medico e despesa
+dedutivel comum) e `13` Donations.
+
+Tres entradas da tabela sao deliberadamente discutiveis e faceis de mover:
+**`08020000` Electronics** (notebook de autonomo e EQUIPAMENTOS),
+**`08060000` Bookstore** (literatura profissional) e **`0703` Gyms** — nesta
+ultima o workflow diverge de proposito do `TAXMIND_SYSTEM_PROMPT`, que manda
+academia para revisao humana; aqui descarta, para nao inundar a fila de revisao.
+
+**Para ajustar a lista:** edite `CATEGORIAS_SEM_IA` / `EXCECOES_PARA_IA` no node
+`Montar Fila de Transacoes` e replique a mudanca nesta tabela.
+
+Degradacao segura: se a `pluggy-webhook` nao estiver redeployada e nao mandar
+`categoria_pluggy_id`, o pre-filtro nao casa nada e tudo vai para o Gemini.
+Custa mais, nunca classifica errado.
+
+### Lote e rate limit
+
+`Precisa de Classificacao IA?` separa os dois ramos. So o ramo da IA passa pelo
+`Lotes para o Gemini` (Split in Batches, 8 por lote) com `Aguardar Entre Lotes`
+(Wait, 2s) na volta — o ramo do pre-filtro, que numa conta real e a maioria,
+pula o loop inteiro. O node do Gemini tem `retryOnFail` com 3 tentativas e 5s
+de intervalo, para o 429 que escapar do espacamento.
+
+Os dois ramos se juntam em `Juntar Classificacoes` (Merge, append).
+
+### Deduplicacao
+
+Em duas camadas, e a principal e a **primeira**:
+
+1. `Supabase - Transacoes Ja Gravadas` consulta os `transaction_id` que ja
+   existem para aquele item na janela sincronizada, e `Montar Fila de
+   Transacoes` tira do lote o que ja esta gravado — assim tambem **nao se paga
+   IA por transacao repetida**. Isso importa mais do que parece: o `from` da
+   `pluggy-webhook` e truncado em dia, entao todo `item/updated` reenvia o dia
+   corrente inteiro. Duplicata e o caminho normal, nao caso de borda.
+2. `Prefer: resolution=ignore-duplicates` no insert e a rede de seguranca para
+   a corrida entre dois webhooks do mesmo item. Note que o indice unico da
+   migration 005 e **parcial e sobre expressao**
+   (`(usuario_id, dados_open_finance->>'transaction_id')`), e o `on_conflict` do
+   PostgREST so nomeia colunas — nao da para apontar esse indice. Se um
+   conflito escapar da camada 1, o insert falha e a execucao aparece com erro
+   no n8n, que e o comportamento desejado: melhor barulho do que gravacao
+   silenciosamente perdida.
+
+### Gravacao
+
+Um unico POST com o array inteiro, nao uma requisicao por transacao.
+
+`valor` e `data_despesa` vem **do extrato, nunca da IA**: o banco e a fonte de
+verdade e o modelo so foi chamado para classificar. Deixar o numero do LLM
+entrar ali abriria espaco para valor alucinado num dossie que vai para a
+Receita. `categoria` e `deducibilidade` sao validados contra os enums do
+Postgres antes do insert — valor fora da lista derrubaria o lote inteiro com
+22P02.
+
+### Notificacao
+
+**UMA** mensagem por sincronizacao, montada em `Montar Resumo`. Mensagem por
+transacao numa carga inicial de 200 seria uma enchente no WhatsApp do usuario e
+provavelmente um bloqueio do numero pela Meta.
+
+O texto do periodo e derivado de `sincronizado_desde`, nao fixo: a janela
+inicial hoje e `JANELA_INICIAL_DIAS = 30` na `pluggy-webhook`, e sincronizacao
+incremental cobre so alguns dias. Cravar "ultimos 12 meses" viraria mentira na
+primeira vez que alguem mexesse nessa constante.
+
+Quando nao sobra nada novo depois da deduplicacao, o workflow **para sem
+mandar mensagem** — avisar "classifiquei 0 despesas" a cada re-sincronizacao do
+dia seria exatamente o spam que o fluxo evita.
+
+Caveat operacional conhecido: a mensagem e texto livre, entao depende da janela
+de 24h da Meta estar aberta. Uma sincronizacao que caia fora da janela vai
+falhar no envio. Resolver isso exige template aprovado, que ainda nao existe.
+
+### Verificacao ja feita
+
+Rodado no n8n 1.99.1 (a versao fixada no `docker-compose.yml`), em instancia
+descartavel, com Supabase e Graph API mockados e Gemini real:
+
+- payload misto: os dois ramos ativos, Merge devolvendo os itens dos dois;
+- **payload 100% pre-filtrado** (o caso do sandbox): `Lotes para o Gemini` com
+  zero execucoes e o Merge disparando assim mesmo — era o risco de desenho;
+- payload 100% IA: espelho do anterior;
+- transacao solta sem envelope;
+- 20 transacoes: 3 lotes de 8/8/4, 3 esperas, **1** insert.
+
+Nao exercitado ainda: conflito real no indice unico, e a janela de 24h da Meta.
+
+Variaveis de ambiente esperadas no processo do n8n: `SUPABASE_URL`,
+`SUPABASE_SERVICE_ROLE_KEY`, `GEMINI_API_KEY`, `WHATSAPP_ACCESS_TOKEN`,
+`WHATSAPP_PHONE_NUMBER_ID` — todas ja usadas pelos outros workflows. Nenhuma
+variavel nova.

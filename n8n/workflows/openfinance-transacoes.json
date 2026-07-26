@@ -1,0 +1,579 @@
+{
+  "name": "openfinance-transacoes",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "openfinance-transacoes",
+        "options": {}
+      },
+      "id": "a1f0c3d2-0001-4a10-9b21-0f1e2d3c4b50",
+      "name": "Webhook - Transacoes Open Finance",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        340
+      ],
+      "webhookId": "openfinance-transacoes"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Aceita as duas formas de entrada sem exigir logica diferente downstream:\n//   - envelope da pluggy-webhook: { usuario_id, item_id, sincronizado_desde, transacoes: [...] }\n//   - uma transacao solta no corpo, ou um array cru de transacoes\n// Em todos os casos sai UM item so, com a lista inteira dentro. Isso e de\n// proposito: os dois lookups no Supabase que vem logo depois sao nodes HTTP, e\n// node HTTP roda uma vez por item de entrada. Fanar para N itens aqui viraria\n// N consultas identicas ao banco numa carga de 200 transacoes.\nconst raiz = $input.first().json;\nconst body = raiz && raiz.body !== undefined ? raiz.body : raiz;\n\nlet envelope = {};\nlet transacoes = [];\n\nif (Array.isArray(body)) {\n  transacoes = body;\n} else if (body && Array.isArray(body.transacoes)) {\n  envelope = body;\n  transacoes = body.transacoes;\n} else if (body && body.transaction_id) {\n  transacoes = [body];\n}\n\ntransacoes = transacoes.filter((t) => t && t.transaction_id);\n\nif (transacoes.length === 0) {\n  throw new Error(\"Payload de Open Finance sem nenhuma transacao com transaction_id\");\n}\n\nconst itemId = envelope.item_id || transacoes[0].item_id || null;\nif (!itemId) {\n  throw new Error(\"Payload de Open Finance sem item_id; nao ha como resolver o dono das transacoes\");\n}\n\n// Piso de data da consulta de deduplicacao. Quando o envelope nao traz\n// sincronizado_desde, a transacao mais antiga do lote serve: nao adianta\n// procurar duplicata antes da janela que chegou.\nconst datas = transacoes.map((t) => t.data_despesa).filter(Boolean).sort();\n\nreturn [{\n  json: {\n    usuario_id: envelope.usuario_id || transacoes[0].usuario_id || null,\n    item_id: itemId,\n    sincronizado_desde: envelope.sincronizado_desde || null,\n    piso_data_dedup: envelope.sincronizado_desde || datas[0] || \"1900-01-01\",\n    total_recebidas: transacoes.length,\n    transacoes,\n  },\n}];"
+      },
+      "id": "a1f0c3d2-0002-4a10-9b21-0f1e2d3c4b50",
+      "name": "Preparar Lote",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -500,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/open_finance_items",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "select",
+              "value": "usuario_id,connector_nome,usuarios(telefone_whatsapp)"
+            },
+            {
+              "name": "pluggy_item_id",
+              "value": "=eq.{{ $json.item_id }}"
+            },
+            {
+              "name": "limit",
+              "value": "1"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1f0c3d2-0003-4a10-9b21-0f1e2d3c4b50",
+      "name": "Supabase - Resolver Item e Usuario",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -280,
+        340
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/recibos_evidencias",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "select",
+              "value": "transaction_id:dados_open_finance->>transaction_id"
+            },
+            {
+              "name": "dados_open_finance->>item_id",
+              "value": "=eq.{{ $('Preparar Lote').first().json.item_id }}"
+            },
+            {
+              "name": "data_despesa",
+              "value": "=gte.{{ $('Preparar Lote').first().json.piso_data_dedup }}"
+            },
+            {
+              "name": "limit",
+              "value": "20000"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a1f0c3d2-0004-4a10-9b21-0f1e2d3c4b50",
+      "name": "Supabase - Transacoes Ja Gravadas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -60,
+        340
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Resolve o dono, tira o que ja esta gravado e decide, transacao a transacao,\n// quem precisa do Gemini. Sai UM item do n8n por transacao a processar.\n//\n// ---------------------------------------------------------------------------\n// PRE-FILTRO POR CATEGORIA DA PLUGGY\n// ---------------------------------------------------------------------------\n// Objetivo: nao pagar chamada de IA para o que nunca vai ser dedutivel. Numa\n// conta real isso corta a maioria das transacoes.\n//\n// Casa por `categoria_pluggy_id` (ex.: \"18020000\"), nao pelo rotulo em ingles:\n// o id e hierarquico (2 primeiros digitos = categoria de topo, 4 primeiros =\n// subcategoria) e estavel, enquanto `category` e texto de exibicao que a Pluggy\n// pode renomear sem quebrar contrato. A ordem da lista importa: prefixo mais\n// especifico tem que vir antes do mais generico (\"08090000\" antes de \"08\").\n//\n// Principio da lista: falso negativo e pior que chamada de IA desperdicada.\n// Descartar algo dedutivel some em silencio do dossie do usuario; uma chamada\n// extra ao Gemini custa centavos. Por isso o DEFAULT E MANDAR PARA A IA —\n// categoria nula, id ausente, categoria ambigua ou categoria nova que a Pluggy\n// venha a criar caem todas no caminho da IA. So o que esta explicitamente\n// listado abaixo e descartado.\n//\n// Consequencia util: se a pluggy-webhook nao estiver redeployada e nao mandar\n// `categoria_pluggy_id`, o pre-filtro simplesmente nao casa nada e tudo vai\n// para o Gemini. Degrada em custo, nunca em correcao.\n//\n// PARA AJUSTAR A LISTA: edite CATEGORIAS_SEM_IA / EXCECOES_PARA_IA aqui e\n// replique a mudanca na secao correspondente de n8n/workflows/README.md.\n// A taxonomia completa (130 categorias) sai de `GET https://api.pluggy.ai/categories`.\nconst CATEGORIAS_SEM_IA = [\n  [\"04\", \"OUTROS\", \"Transferencia entre contas do proprio titular: nao e despesa\"],\n  [\"05060000\", \"OUTROS\", \"Transferencia interna entre contas proprias\"],\n  [\"05100000\", \"OUTROS\", \"Pagamento de fatura de cartao: as compras do cartao ja entram uma a uma, contar a fatura duplicaria\"],\n  [\"01\", \"OUTROS\", \"Income: entrada de dinheiro, nao despesa\"],\n  [\"03\", \"OUTROS\", \"Investimento: aplicacao ou resgate, nao despesa\"],\n  [\"08090000\", \"OUTROS\", \"Cashback: bonificacao recebida, nao despesa\"],\n  [\"08\", \"OUTROS\", \"Shopping: consumo pessoal (compra online, eletronico, vestuario, pet, brinquedo, artigo esportivo, livraria)\"],\n  [\"09\", \"OUTROS\", \"Servico digital de entretenimento: jogo, streaming de video e de musica\"],\n  [\"10\", \"ALIMENTACAO\", \"Supermercado: alimentacao pessoal\"],\n  [\"11\", \"ALIMENTACAO\", \"Restaurante, bar e delivery: alimentacao pessoal\"],\n  [\"12030000\", \"TRANSPORTE\", \"Programa de milhas: pontuacao, nao despesa\"],\n  [\"14\", \"OUTROS\", \"Aposta e loteria: nunca dedutivel\"],\n  [\"21\", \"OUTROS\", \"Lazer: nunca dedutivel\"],\n  [\"0703\", \"OUTROS\", \"Academia, pratica esportiva e bem-estar: nao dedutivel no IRPF\"],\n  [\"0704\", \"OUTROS\", \"Ingresso de estadio, museu, cinema e teatro: entretenimento\"],\n];\n\n// Ficam dentro de um prefixo descartado, mas seguem para a IA assim mesmo.\nconst EXCECOES_PARA_IA = new Set([\n  \"08080000\", // Office supplies: material de escritorio pode entrar no livro-caixa do autonomo\n]);\n\nconst SYSTEM_PROMPT = \"\\nVoce e o TaxMind, um copiloto fiscal brasileiro que funciona pelo WhatsApp.\\n\\nSua funcao no MVP e analisar mensagens, imagens OCRizadas, cupons, recibos,\\nnotas fiscais, comprovantes bancarios e descricoes livres enviadas por\\nprofissionais autonomos, pequenos empreendedores e clientes de contadores.\\n\\nVoce nao substitui contador, advogado ou a Receita Federal. Voce organiza\\nevidencias, classifica riscos e prepara um dossie auditavel para revisao.\\nQuando houver duvida material, dado ausente ou risco de glosa, marque revisao\\nhumana. Nunca invente dados fiscais, documentos, codigos, datas ou valores.\\n\\nTOM\\n- Portugues do Brasil.\\n- Informal, direto e amigavel.\\n- Seja curto na mensagem ao usuario.\\n- Seja rigoroso, conservador e estruturado na saida tecnica.\\n\\nOBJETIVO PRINCIPAL\\nExtrair e classificar uma despesa a partir da entrada do usuario, retornando:\\n1. descricao normalizada;\\n2. valor monetario;\\n3. data da despesa;\\n4. estabelecimento ou prestador;\\n5. CPF/CNPJ/documento do prestador quando existir;\\n6. categoria fiscal;\\n7. status de dedutibilidade no IRPF;\\n8. justificativa fiscal curta;\\n9. evidencias encontradas;\\n10. pendencias para auditoria;\\n11. nivel de confianca;\\n12. necessidade de revisao humana.\\n\\nCATEGORIAS FISCAIS PERMITIDAS\\nUse exatamente uma destas categorias:\\n- SAUDE\\n- EDUCACAO\\n- ALIMENTACAO\\n- TRANSPORTE\\n- MORADIA\\n- ESCRITORIO\\n- EQUIPAMENTOS\\n- SOFTWARE\\n- INTERNET_TELEFONIA\\n- SERVICOS_PROFISSIONAIS\\n- IMPOSTOS_TAXAS\\n- OUTROS\\n\\nSTATUS DE DEDUTIBILIDADE PERMITIDOS\\nUse exatamente um destes status:\\n- DEDUTIVEL\\n- NAO_DEDUTIVEL\\n- PARCIALMENTE_DEDUTIVEL\\n- INDETERMINADO\\n\\nREGRAS FISCAIS CONSERVADORAS PARA IRPF\\nClassifique como DEDUTIVEL apenas quando a evidencia for forte o bastante.\\nClassifique como INDETERMINADO quando depender de contexto que nao esta na\\nmensagem, como vinculo com atividade profissional, dependente, reembolso,\\nescrituracao em livro-caixa ou comprovacao formal.\\n\\n1. SAUDE\\nPode ser potencialmente dedutivel no IRPF quando houver indicios de servico\\nde saude aceito, como medico, dentista, psicologo, fisioterapeuta,\\nfonoaudiologo, terapeuta ocupacional, hospital, laboratorio, exame,\\nradiologia, aparelho ortopedico, protese ortopedica ou protese dentaria.\\n\\nMarque DEDUTIVEL somente se houver:\\n- valor;\\n- data ou competencia;\\n- identificacao do prestador ou estabelecimento;\\n- indicio claro de servico/produto de saude dedutivel;\\n- ausencia de indicio de reembolso integral.\\n\\nMarque REVISAO_HUMANA quando:\\n- for compra generica de farmacia sem prescricao ou sem relacao clara com\\n  tratamento dedutivel;\\n- houver estetica, cosmetico, suplemento, academia, massagem relaxante,\\n  procedimento sem finalidade medica clara ou item ambiguo;\\n- faltar documento do prestador;\\n- houver divergencia entre texto, OCR e valor;\\n- houver reembolso, coparticipacao, plano de saude ou comprovante parcial.\\n\\nValidacao medica de nicho:\\n- Procure codigos TUSS, CBHPM, CID, CRM, CRO, CNES, guia de consulta,\\n  procedimento, honorarios medicos, exame, laudo, SADT, ambulatorial,\\n  internacao, consulta, terapia, sessao, laboratorio e termos equivalentes.\\n- Se encontrar TUSS/CBHPM/CID/CRM/CRO/CNES ou termos tecnicos equivalentes,\\n  preencha possui_indicio_tuss_cbhpm como true quando aplicavel e liste os\\n  codigos ou termos em codigos_medicos_identificados e termos_auditoria_identificados.\\n- Nao valide se o codigo e real; apenas extraia o que aparece e sinalize para\\n  auditoria posterior.\\n\\n2. EDUCACAO\\nPode ser potencialmente dedutivel quando indicar instituicao de ensino e\\nmensalidade ou anuidade de educacao formal, como creche, pre-escola, ensino\\nfundamental, medio, superior, especializacao ou curso profissionalizante.\\n\\nMarque INDETERMINADO ou REVISAO_HUMANA quando envolver curso livre, idioma,\\nreforco, material escolar, uniforme, transporte escolar, app educacional ou\\ntreinamento corporativo sem comprovacao de enquadramento.\\n\\n3. LIVRO-CAIXA / ATIVIDADE PROFISSIONAL DE AUTONOMO\\nPara autonomos, algumas despesas podem ser dedutiveis via livro-caixa quando\\nforem necessarias a atividade, escrituradas e comprovadas. Exemplos possiveis:\\naluguel de consultorio, luz, telefone, internet, material de escritorio,\\nservicos profissionais, manutencao, salario/encargos de auxiliares,\\nsoftware de trabalho e despesas compartilhadas rateadas.\\n\\nUse PARCIALMENTE_DEDUTIVEL ou INDETERMINADO se a despesa pode ter uso misto\\npessoal/profissional, como internet residencial, celular, computador, veiculo,\\ncombustivel, alimentacao, coworking, assinatura de software generico ou aluguel.\\nInclua pendencia pedindo contexto de uso profissional e comprovacao.\\n\\n4. ALIMENTACAO\\nEm regra, trate como NAO_DEDUTIVEL para IRPF pessoal. Para autonomo, pode\\nser INDETERMINADO apenas se houver contexto profissional forte e necessidade\\nde revisao do contador. Nunca aprove automaticamente alimentacao.\\n\\n5. TRANSPORTE\\nEm regra, trate como INDETERMINADO quando relacionado a atividade profissional\\ne NAO_DEDUTIVEL quando claramente pessoal. Combustivel, app de transporte,\\nestacionamento, pedagio e manutencao de veiculo exigem contexto de atividade,\\nrateio e comprovacao.\\n\\n6. MORADIA\\nAluguel, condominio, energia e agua residenciais sao normalmente pessoais.\\nUse INDETERMINADO/PARCIALMENTE_DEDUTIVEL apenas quando houver indicio de\\nhome office, consultorio, sublocacao, aluguel que produz rendimento ou rateio\\nprofissional documentado.\\n\\n7. ESCRITORIO, EQUIPAMENTOS, SOFTWARE, INTERNET_TELEFONIA\\nPodem ser despesas de atividade profissional para autonomo, mas exigem nexo\\ncom a atividade. Se o nexo nao estiver claro, marque INDETERMINADO e peca\\ncomplementacao. Se houver uso misto, prefira PARCIALMENTE_DEDUTIVEL.\\n\\n8. IMPOSTOS_TAXAS\\nClassifique taxas, emolumentos, alvaras, conselhos profissionais, tributos,\\ncertidoes e taxas bancarias aqui. A dedutibilidade depende do contexto.\\nSe forem diretamente ligadas a atividade profissional, use INDETERMINADO ou\\nPARCIALMENTE_DEDUTIVEL com revisao humana.\\n\\n9. OUTROS\\nUse quando a despesa nao se encaixar ou a evidencia for insuficiente.\\nNa duvida, nao force categoria dedutivel.\\n\\nREGRAS DE OCR E EVIDENCIA\\n- Diferencie texto visto na evidencia de inferencias suas.\\n- Se o OCR estiver truncado, borrado ou contraditorio, reduza confidence_score.\\n- Se houver varios valores, escolha o total apenas quando estiver claramente\\n  identificado como total, valor pago, valor liquido ou valor da nota.\\n- Preserve valor_original quando aparecer no texto; normalize valor como numero.\\n- Datas brasileiras podem vir como DD/MM/AAAA. Normalize em ISO AAAA-MM-DD\\n  quando possivel.\\n- CPF/CNPJ deve ser extraido somente se aparecer. Nao complete digitos.\\n- Nunca exponha CPF completo na mensagem ao usuario. Na saida tecnica, use\\n  documento_prestador exatamente como extraido, pois sera protegido no backend.\\n\\nCONFIDENCE SCORE\\nUse numero de 0 a 1.\\n- 0.90 a 1.00: evidencia clara, valor unico, categoria clara, documento coerente.\\n- 0.75 a 0.89: bom sinal, mas falta algum detalhe menor.\\n- 0.50 a 0.74: ambiguo, OCR parcial, categoria provavel ou contexto insuficiente.\\n- abaixo de 0.50: baixa confianca, muitos dados ausentes ou contraditorios.\\n\\nREGRAS DE REVISAO HUMANA\\nrequer_revisao_humana deve ser true quando:\\n- confidence_score < 0.85;\\n- deducibilidade for INDETERMINADO ou PARCIALMENTE_DEDUTIVEL;\\n- categoria for SAUDE e faltar prestador, documento, tipo de servico ou data;\\n- houver indicio de gasto medico ambiguo, estetico ou farmacia generica;\\n- houver uso misto pessoal/profissional;\\n- houver possivel reembolso;\\n- houver OCR ruim ou contradicao entre campos;\\n- valor for alto, incomum ou sem comprovante claro;\\n- a decisao depender de contador, livro-caixa, dependente, alimentando ou\\n  comprovacao externa.\\n\\nFORMATO DE RESPOSTA OBRIGATORIO\\nResponda sempre com duas partes:\\n\\n1. Uma mensagem curta para o usuario, fora das tags.\\n2. Um bloco tecnico unico dentro de <expense>...</expense> contendo JSON valido.\\n\\nNao coloque Markdown dentro de <expense>. Nao use comentarios no JSON.\\nNao adicione texto depois de </expense>.\\n\\nSCHEMA DO JSON\\n{\\n  \\\"tipo\\\": \\\"expense_classification\\\",\\n  \\\"versao_prompt\\\": \\\"taxmind-irpf-mvp-2026-07-09\\\",\\n  \\\"descricao\\\": \\\"string curta e normalizada\\\",\\n  \\\"descricao_original\\\": \\\"string ou null\\\",\\n  \\\"valor\\\": 0.00,\\n  \\\"valor_original\\\": \\\"string ou null\\\",\\n  \\\"moeda\\\": \\\"BRL\\\",\\n  \\\"data_despesa\\\": \\\"AAAA-MM-DD ou null\\\",\\n  \\\"estabelecimento\\\": \\\"string ou null\\\",\\n  \\\"documento_prestador\\\": \\\"string ou null\\\",\\n  \\\"categoria\\\": \\\"SAUDE|EDUCACAO|ALIMENTACAO|TRANSPORTE|MORADIA|ESCRITORIO|EQUIPAMENTOS|SOFTWARE|INTERNET_TELEFONIA|SERVICOS_PROFISSIONAIS|IMPOSTOS_TAXAS|OUTROS\\\",\\n  \\\"deducibilidade\\\": \\\"DEDUTIVEL|NAO_DEDUTIVEL|PARCIALMENTE_DEDUTIVEL|INDETERMINADO\\\",\\n  \\\"justificativa_deducibilidade\\\": \\\"string curta\\\",\\n  \\\"confidence_score\\\": 0.00,\\n  \\\"requer_revisao_humana\\\": true,\\n  \\\"motivos_revisao\\\": [\\\"string\\\"],\\n  \\\"evidencias_extraidas\\\": [\\\"string\\\"],\\n  \\\"campos_ausentes\\\": [\\\"string\\\"],\\n  \\\"possui_indicio_tuss_cbhpm\\\": false,\\n  \\\"codigos_medicos_identificados\\\": [\\\"string\\\"],\\n  \\\"termos_auditoria_identificados\\\": [\\\"string\\\"],\\n  \\\"alertas_lgpd\\\": [\\\"string\\\"],\\n  \\\"pergunta_de_followup\\\": \\\"string ou null\\\",\\n  \\\"mensagem_usuario\\\": \\\"string curta\\\"\\n}\\n\\nREGRAS PARA CAMPOS\\n- valor deve ser numero JSON. Se nao houver valor confiavel, use 0 e marque\\n  revisao humana com campo ausente \\\"valor\\\".\\n- descricao nunca deve ficar vazia; se nao houver descricao, use \\\"Despesa nao identificada\\\".\\n- motivos_revisao deve ser [] apenas quando requer_revisao_humana for false.\\n- campos_ausentes deve listar dados importantes que faltaram.\\n- pergunta_de_followup deve conter no maximo uma pergunta objetiva quando faltar\\n  dado essencial. Caso nao precise perguntar nada, use null.\\n- mensagem_usuario deve ser igual, ou semanticamente equivalente, a mensagem\\n  curta enviada antes do bloco <expense>.\\n\\nEXEMPLO DE RESPOSTA\\nBoa, registrei como despesa de saude e vou deixar separado para revisao do contador.\\n<expense>{\\n  \\\"tipo\\\": \\\"expense_classification\\\",\\n  \\\"versao_prompt\\\": \\\"taxmind-irpf-mvp-2026-07-09\\\",\\n  \\\"descricao\\\": \\\"Consulta medica\\\",\\n  \\\"descricao_original\\\": \\\"consulta clinica\\\",\\n  \\\"valor\\\": 350.00,\\n  \\\"valor_original\\\": \\\"R$ 350,00\\\",\\n  \\\"moeda\\\": \\\"BRL\\\",\\n  \\\"data_despesa\\\": \\\"2026-07-09\\\",\\n  \\\"estabelecimento\\\": \\\"Clinica Exemplo\\\",\\n  \\\"documento_prestador\\\": null,\\n  \\\"categoria\\\": \\\"SAUDE\\\",\\n  \\\"deducibilidade\\\": \\\"INDETERMINADO\\\",\\n  \\\"justificativa_deducibilidade\\\": \\\"Despesa medica pode ser dedutivel, mas falta documento do prestador para auditoria.\\\",\\n  \\\"confidence_score\\\": 0.78,\\n  \\\"requer_revisao_humana\\\": true,\\n  \\\"motivos_revisao\\\": [\\\"Falta documento do prestador\\\", \\\"Classificacao fiscal depende de comprovacao formal\\\"],\\n  \\\"evidencias_extraidas\\\": [\\\"consulta clinica\\\", \\\"R$ 350,00\\\", \\\"Clinica Exemplo\\\"],\\n  \\\"campos_ausentes\\\": [\\\"documento_prestador\\\"],\\n  \\\"possui_indicio_tuss_cbhpm\\\": false,\\n  \\\"codigos_medicos_identificados\\\": [],\\n  \\\"termos_auditoria_identificados\\\": [\\\"consulta\\\"],\\n  \\\"alertas_lgpd\\\": [\\\"Documento pode conter dado sensivel de saude\\\"],\\n  \\\"pergunta_de_followup\\\": \\\"Voce tem o recibo com CPF ou CNPJ do prestador?\\\",\\n  \\\"mensagem_usuario\\\": \\\"Boa, registrei como despesa de saude e vou deixar separado para revisao do contador.\\\"\\n}</expense>\\n\";\n\nfunction decidirPreFiltro(categoriaId) {\n  if (!categoriaId) return null;\n  if (EXCECOES_PARA_IA.has(categoriaId)) return null;\n  for (const [prefixo, categoria, motivo] of CATEGORIAS_SEM_IA) {\n    if (String(categoriaId).startsWith(prefixo)) return { categoria, motivo };\n  }\n  return null;\n}\n\n// Node HTTP com resposta JSON array pode emitir um item por linha ou um item\n// unico contendo o array, dependendo da versao. E com alwaysOutputData ligado,\n// resposta vazia vira um item {}. Achata os tres casos.\nfunction linhasDe(nome) {\n  let brutos = [];\n  try {\n    brutos = $(nome).all().map((i) => i.json);\n  } catch (e) {\n    return [];\n  }\n  const linhas = [];\n  for (const bruto of brutos) {\n    if (Array.isArray(bruto)) linhas.push(...bruto);\n    else if (bruto && Object.keys(bruto).length > 0) linhas.push(bruto);\n  }\n  return linhas;\n}\n\nconst contexto = $(\"Preparar Lote\").first().json;\nconst vinculo = linhasDe(\"Supabase - Resolver Item e Usuario\")[0] || {};\n\n// A pluggy-webhook ja resolveu o dono antes de encaminhar (open_finance_items,\n// com backfill pelo clientUserId do item). O lookup local e fallback: cobre\n// payload montado a mao, replay de webhook antigo e teste manual.\nconst usuarioId = contexto.usuario_id || vinculo.usuario_id || null;\nif (!usuarioId) {\n  throw new Error(\n    \"Nao foi possivel resolver usuario_id: o payload nao trouxe e o item \" +\n      contexto.item_id +\n      \" nao esta em open_finance_items\",\n  );\n}\n\nconst usuario = Array.isArray(vinculo.usuarios) ? vinculo.usuarios[0] : vinculo.usuarios;\nconst telefone = (usuario && usuario.telefone_whatsapp) || null;\n\nconst jaGravadas = new Set(\n  linhasDe(\"Supabase - Transacoes Ja Gravadas\")\n    .map((l) => l.transaction_id)\n    .filter(Boolean),\n);\n\nconst vistas = new Set();\nconst fila = [];\nlet duplicadas = 0;\n\nfor (const t of contexto.transacoes) {\n  // Duas fontes de duplicata: o que ja esta no banco (todo item/updated\n  // reenvia o dia corrente inteiro, porque o `from` da Edge Function e\n  // truncado em dia) e repeticao dentro do proprio payload.\n  if (jaGravadas.has(t.transaction_id) || vistas.has(t.transaction_id)) {\n    duplicadas += 1;\n    continue;\n  }\n  vistas.add(t.transaction_id);\n\n  const preFiltro = decidirPreFiltro(t.categoria_pluggy_id);\n  const descricao = t.descricao || \"Transacao bancaria\";\n  const valor = Number(t.valor) || 0;\n  const valorFmt = valor.toFixed(2).replace(\".\", \",\");\n\n  const entradaIa = [\n    \"Origem da evidencia: transacao bancaria importada por Open Finance (agregador Pluggy).\",\n    \"Nao existe imagem, cupom, nota fiscal nem texto escrito pelo usuario. Os campos\",\n    \"abaixo sao tudo que se sabe sobre esta despesa.\",\n    \"\",\n    \"Descricao no extrato: \" + descricao,\n    \"Descricao original do banco: \" + (t.descricao_original || \"nao informada\"),\n    \"Valor: R$ \" + valorFmt,\n    \"Data da despesa: \" + (t.data_despesa || \"nao informada\"),\n    \"Conta de origem: \" + (t.conta_nome || \"nao informada\") +\n      (vinculo.connector_nome ? \" (\" + vinculo.connector_nome + \")\" : \"\"),\n    \"Estabelecimento informado pelo banco: \" + (t.estabelecimento || \"nao informado\"),\n    \"CNPJ/CPF do recebedor: \" + (t.documento_prestador || \"nao informado\"),\n    \"Categoria atribuida pelo agregador: \" + (t.categoria_pluggy || \"nao informada\"),\n    \"\",\n    \"Descricao de extrato bancario costuma vir abreviada, em caixa alta e sem contexto.\",\n    \"Nao invente estabelecimento, documento, item ou finalidade que nao esteja acima.\",\n    \"Se os dados nao permitirem identificar a natureza da despesa com seguranca, use\",\n    \"deducibilidade INDETERMINADO, reduza o confidence_score e marque requer_revisao_humana.\",\n    \"Use exatamente o valor e a data informados acima; nao normalize nem arredonde.\",\n  ].join(\"\\n\");\n\n  fila.push({\n    json: {\n      usuario_id: usuarioId,\n      telefone,\n      item_id: contexto.item_id,\n      connector_nome: vinculo.connector_nome || null,\n      sincronizado_desde: contexto.sincronizado_desde,\n      transaction_id: t.transaction_id,\n      account_id: t.account_id || null,\n      conta_nome: t.conta_nome || null,\n      descricao,\n      descricao_original: t.descricao_original || null,\n      valor,\n      moeda: t.moeda || \"BRL\",\n      data_despesa: t.data_despesa || null,\n      estabelecimento: t.estabelecimento || null,\n      documento_prestador: t.documento_prestador || null,\n      categoria_pluggy: t.categoria_pluggy || null,\n      categoria_pluggy_id: t.categoria_pluggy_id || null,\n      precisa_ia: preFiltro === null,\n      pre_filtro: preFiltro,\n      system_prompt: SYSTEM_PROMPT,\n      entrada_ia: entradaIa,\n    },\n  });\n}\n\n// Contadores lidos depois por \"Montar Resumo\". Ficam repetidos em todo item\n// porque o node seguinte e um IF que pode esvaziar um dos ramos: guardar so no\n// primeiro item perderia o numero quando ele cair no ramo que nao executou.\nconst totalIa = fila.filter((i) => i.json.precisa_ia).length;\nfor (const item of fila) {\n  item.json.lote_recebidas = contexto.total_recebidas;\n  item.json.lote_duplicadas = duplicadas;\n  item.json.lote_a_processar = fila.length;\n  item.json.lote_para_ia = totalIa;\n}\n\nif (fila.length === 0) {\n  // Nada novo: todas as transacoes do payload ja estavam gravadas. Sem itens o\n  // workflow simplesmente para aqui, e parar e o comportamento certo — mandar\n  // \"classifiquei 0 despesas\" no WhatsApp a cada re-sincronizacao do dia seria\n  // exatamente o spam que este fluxo tem que evitar.\n  console.log(\n    \"nada a processar: \" + duplicadas + \" de \" + contexto.total_recebidas +\n      \" transacoes ja estavam gravadas (item \" + contexto.item_id + \")\",\n  );\n}\n\nreturn fila;"
+      },
+      "id": "a1f0c3d2-0005-4a10-9b21-0f1e2d3c4b50",
+      "name": "Montar Fila de Transacoes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-precisa-ia",
+              "leftValue": "={{ $json.precisa_ia }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "a1f0c3d2-0006-4a10-9b21-0f1e2d3c4b50",
+      "name": "Precisa de Classificacao IA?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        380,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 8,
+        "options": {}
+      },
+      "id": "a1f0c3d2-0007-4a10-9b21-0f1e2d3c4b50",
+      "name": "Lotes para o Gemini",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        600,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  contents: [\n    {\n      role: \"user\",\n      parts: [\n        { text: $json.system_prompt + \"\\n\\n\" + $json.entrada_ia }\n      ]\n    }\n  ],\n  generationConfig: {\n    temperature: 0.2,\n    maxOutputTokens: 4096,\n    thinkingConfig: { thinkingLevel: \"low\" }\n  }\n}) }}",
+        "options": {}
+      },
+      "id": "a1f0c3d2-0008-4a10-9b21-0f1e2d3c4b50",
+      "name": "Gemini - Classificar Transacao",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        820,
+        180
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const resposta = $input.item.json;\nconst origem = $(\"Lotes para o Gemini\").item.json;\n\nconst texto =\n  (resposta &&\n    resposta.candidates &&\n    resposta.candidates[0] &&\n    resposta.candidates[0].content &&\n    resposta.candidates[0].content.parts &&\n    resposta.candidates[0].content.parts[0] &&\n    resposta.candidates[0].content.parts[0].text) ||\n  \"\";\n\n// Diferenca proposital em relacao ao receipt-ocr-classification: la o parser\n// lanca excecao quando nao acha o bloco <expense>, porque a execucao trata uma\n// mensagem so e falhar avisa o usuario. Aqui uma excecao derrubaria o lote\n// inteiro e as outras transacoes junto. Entao resposta ruim vira uma evidencia\n// INDETERMINADA em revisao humana, que e o destino conservador correto.\n//\n// Resposta vazia nao e caso hipotetico: o gemini-3-flash-preview nao permite\n// desligar thinking, e quando o thinking consome o orcamento de saida o texto\n// volta em branco (ver AGENTS.md).\nfunction semClassificacao(motivo) {\n  return {\n    categoria: \"OUTROS\",\n    deducibilidade: \"INDETERMINADO\",\n    justificativa_deducibilidade: motivo,\n    confidence_score: 0.2,\n    requer_revisao_humana: true,\n    motivos_revisao: [motivo],\n    possui_indicio_tuss_cbhpm: false,\n    codigos_medicos_identificados: [],\n    termos_auditoria_identificados: [],\n    falha_ia: motivo,\n  };\n}\n\nlet classificacao;\n\nif (!texto.trim()) {\n  classificacao = semClassificacao(\"A IA devolveu resposta vazia para esta transacao\");\n} else {\n  const limpo = texto\n    .replace(/\\\\n/g, \"\\n\")\n    .replace(/\\\\\"/g, '\"')\n    .replace(/\\\\\\\\/g, \"\\\\\");\n  const bloco = limpo.match(/<expense>([\\s\\S]*?)<\\/expense>/);\n\n  if (!bloco) {\n    classificacao = semClassificacao(\"A resposta da IA nao trouxe o bloco <expense>\");\n  } else {\n    try {\n      classificacao = JSON.parse(bloco[1].trim());\n    } catch (e) {\n      classificacao = semClassificacao(\"JSON invalido dentro do bloco <expense>: \" + e.message);\n    }\n  }\n}\n\nreturn {\n  json: {\n    ...origem,\n    system_prompt: undefined,\n    entrada_ia: undefined,\n    fonte_classificacao: \"GEMINI\",\n    classificacao,\n  },\n};"
+      },
+      "id": "a1f0c3d2-0009-4a10-9b21-0f1e2d3c4b50",
+      "name": "Interpretar Resposta do Gemini",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "id": "a1f0c3d2-000a-4a10-9b21-0f1e2d3c4b50",
+      "name": "Aguardar Entre Lotes",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1260,
+        180
+      ],
+      "webhookId": "a1f0c3d2-000a-4a10-9b21-0f1e2d3c4b51"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Ramo que nao passa pela IA: a categoria da Pluggy ja basta para cravar\n// NAO_DEDUTIVEL. Monta a mesma forma de saida do ramo do Gemini para que\n// \"Montar Evidencias\" trate os dois sem saber de onde vieram.\n//\n// confidence_score alto (0.95) e requer_revisao_humana false sao deliberados:\n// nao ha ambiguidade a resolver. O que sustenta o numero e a categoria do\n// agregador, e a justificativa registra qual regra decidiu — a trilha fica\n// auditavel sem precisar reprocessar nada.\nreturn $input.all().map((item) => {\n  const t = item.json;\n  const preFiltro = t.pre_filtro || {};\n\n  return {\n    json: {\n      ...t,\n      system_prompt: undefined,\n      entrada_ia: undefined,\n      fonte_classificacao: \"PRE_FILTRO\",\n      classificacao: {\n        categoria: preFiltro.categoria || \"OUTROS\",\n        deducibilidade: \"NAO_DEDUTIVEL\",\n        justificativa_deducibilidade:\n          \"Classificado sem IA pela categoria do agregador (\" +\n          (t.categoria_pluggy || \"sem rotulo\") +\n          \" / \" +\n          (t.categoria_pluggy_id || \"sem id\") +\n          \"): \" +\n          (preFiltro.motivo || \"categoria nunca dedutivel no IRPF\"),\n        confidence_score: 0.95,\n        requer_revisao_humana: false,\n        motivos_revisao: [],\n        possui_indicio_tuss_cbhpm: false,\n        codigos_medicos_identificados: [],\n        termos_auditoria_identificados: [],\n      },\n    },\n  };\n});"
+      },
+      "id": "a1f0c3d2-000b-4a10-9b21-0f1e2d3c4b50",
+      "name": "Aplicar Pre-Filtro de Categoria",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 2
+      },
+      "id": "a1f0c3d2-000c-4a10-9b21-0f1e2d3c4b50",
+      "name": "Juntar Classificacoes",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [
+        1480,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Junta os dois ramos numa lista unica de linhas prontas para o PostgREST.\n// Sai UM item so, com o array inteiro em `linhas`: o insert seguinte manda\n// tudo num POST so, em vez de uma requisicao por transacao.\nconst itens = $input.all().map((i) => i.json).filter((t) => t && t.transaction_id);\n\nconst CATEGORIAS_VALIDAS = new Set([\n  \"SAUDE\", \"EDUCACAO\", \"ALIMENTACAO\", \"TRANSPORTE\", \"MORADIA\", \"ESCRITORIO\",\n  \"EQUIPAMENTOS\", \"SOFTWARE\", \"INTERNET_TELEFONIA\", \"SERVICOS_PROFISSIONAIS\",\n  \"IMPOSTOS_TAXAS\", \"OUTROS\",\n]);\nconst DEDUCIBILIDADES_VALIDAS = new Set([\n  \"DEDUTIVEL\", \"NAO_DEDUTIVEL\", \"PARCIALMENTE_DEDUTIVEL\", \"INDETERMINADO\",\n]);\n\nconst linhas = itens.map((t) => {\n  const c = t.classificacao || {};\n\n  // categoria e deducibilidade sao enums no Postgres: valor fora da lista\n  // derruba o insert do lote inteiro com 22P02. O ramo do pre-filtro sempre\n  // manda valor valido; o ramo do Gemini nao tem essa garantia.\n  const categoria = CATEGORIAS_VALIDAS.has(c.categoria) ? c.categoria : \"OUTROS\";\n  const deducibilidade = DEDUCIBILIDADES_VALIDAS.has(c.deducibilidade)\n    ? c.deducibilidade\n    : \"INDETERMINADO\";\n\n  const categoriaTrocada = c.categoria && categoria !== c.categoria;\n  const requerRevisao = c.requer_revisao_humana === false && !categoriaTrocada ? false : true;\n\n  const confianca = Number(c.confidence_score);\n\n  return {\n    usuario_id: t.usuario_id,\n    // Sem sessao_whatsapp_id de proposito: nao existe conversa de WhatsApp\n    // nesta origem, a transacao veio do banco.\n    origem: \"OPEN_FINANCE\",\n    status: requerRevisao ? \"REVISAO_HUMANA\" : \"APROVADO_AUTOMATICAMENTE\",\n    descricao: t.descricao || \"Transacao bancaria\",\n    estabelecimento: t.estabelecimento || c.estabelecimento || null,\n    documento_prestador: t.documento_prestador || c.documento_prestador || null,\n    // valor e data vem do extrato, nunca da IA: o banco e a fonte de verdade e\n    // o modelo so foi chamado para classificar. Deixar o numero do LLM entrar\n    // aqui abriria espaco para valor alucinado num dossie que vai para a Receita.\n    data_despesa: t.data_despesa,\n    valor: Math.round((Number(t.valor) || 0) * 100) / 100,\n    categoria,\n    deducibilidade,\n    justificativa_deducibilidade: c.justificativa_deducibilidade || null,\n    confidence_score: Number.isFinite(confianca) ? Math.min(Math.max(confianca, 0), 1) : 0,\n    requer_revisao_humana: requerRevisao,\n    possui_indicio_tuss_cbhpm: c.possui_indicio_tuss_cbhpm === true,\n    codigos_medicos_identificados: Array.isArray(c.codigos_medicos_identificados)\n      ? c.codigos_medicos_identificados\n      : [],\n    termos_auditoria_identificados: Array.isArray(c.termos_auditoria_identificados)\n      ? c.termos_auditoria_identificados\n      : [],\n    dados_open_finance: {\n      transaction_id: t.transaction_id,\n      item_id: t.item_id,\n      account_id: t.account_id,\n      conta_nome: t.conta_nome,\n      connector_nome: t.connector_nome,\n      categoria_pluggy: t.categoria_pluggy,\n      categoria_pluggy_id: t.categoria_pluggy_id,\n      moeda: t.moeda,\n      descricao_original: t.descricao_original,\n      sincronizado_desde: t.sincronizado_desde,\n      fonte_classificacao: t.fonte_classificacao,\n    },\n    metadados_ia: {\n      fonte: t.fonte_classificacao,\n      modelo: t.fonte_classificacao === \"GEMINI\" ? \"gemini-3-flash-preview\" : null,\n      classificacao: c,\n    },\n  };\n});\n\nconst primeiro = itens[0] || {};\n\nreturn [{\n  json: {\n    linhas,\n    telefone: primeiro.telefone || null,\n    connector_nome: primeiro.connector_nome || null,\n    sincronizado_desde: primeiro.sincronizado_desde || null,\n    total_enviadas: linhas.length,\n    total_por_ia: itens.filter((t) => t.fonte_classificacao === \"GEMINI\").length,\n    total_por_prefiltro: itens.filter((t) => t.fonte_classificacao === \"PRE_FILTRO\").length,\n    lote_recebidas: primeiro.lote_recebidas || linhas.length,\n    lote_duplicadas: primeiro.lote_duplicadas || 0,\n  },\n}];"
+      },
+      "id": "a1f0c3d2-000d-4a10-9b21-0f1e2d3c4b50",
+      "name": "Montar Evidencias",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1700,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/recibos_evidencias",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Prefer",
+              "value": "return=representation,resolution=ignore-duplicates"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.linhas) }}",
+        "options": {}
+      },
+      "id": "a1f0c3d2-000e-4a10-9b21-0f1e2d3c4b50",
+      "name": "Supabase - Inserir Evidencias",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1920,
+        340
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// UMA mensagem por sincronizacao, nunca uma por transacao: numa carga inicial\n// de 200 transacoes, mensagem por despesa seria uma enchente no WhatsApp do\n// usuario e provavelmente um bloqueio do numero pela Meta.\nconst contexto = $(\"Montar Evidencias\").first().json;\n\n// Com resolution=ignore-duplicates o PostgREST devolve so as linhas que\n// entraram de fato; as que bateram no indice unico somem da representacao.\n// Comparar com o que foi enviado da o numero de duplicatas que escaparam do\n// pre-filtro (corrida entre dois webhooks do mesmo item, por exemplo).\nconst gravadas = $input\n  .all()\n  .map((i) => i.json)\n  .reduce((acc, linha) => acc.concat(Array.isArray(linha) ? linha : [linha]), [])\n  .filter((l) => l && l.id);\n\nconst dedutiveis = gravadas.filter(\n  (l) => l.deducibilidade === \"DEDUTIVEL\" || l.deducibilidade === \"PARCIALMENTE_DEDUTIVEL\",\n).length;\nconst emRevisao = gravadas.filter((l) => l.requer_revisao_humana === true).length;\n\nconst brl = (v) =>\n  Number(v || 0).toLocaleString(\"pt-BR\", { style: \"currency\", currency: \"BRL\" });\nconst totalDedutivel = gravadas\n  .filter((l) => l.deducibilidade === \"DEDUTIVEL\" || l.deducibilidade === \"PARCIALMENTE_DEDUTIVEL\")\n  .reduce((soma, l) => soma + Number(l.valor || 0), 0);\n\n// O texto do periodo sai de sincronizado_desde, que a propria Edge Function\n// manda. Nao cravar \"ultimos 12 meses\" e proposital: a janela inicial hoje e\n// JANELA_INICIAL_DIAS = 30 na pluggy-webhook, e sincronizacao incremental cobre\n// so alguns dias. Derivando do campo, a frase continua verdadeira se alguem\n// mexer nessa constante.\nfunction periodo(desde) {\n  if (!desde) return \"\";\n  const ms = Date.now() - new Date(desde + \"T00:00:00Z\").getTime();\n  const dias = Math.round(ms / 86400000);\n  if (dias <= 1) return \" de hoje\";\n  if (dias <= 45) return \" dos ultimos \" + dias + \" dias\";\n  const meses = Math.max(1, Math.round(dias / 30));\n  return \" dos ultimos \" + meses + (meses === 1 ? \" mes\" : \" meses\");\n}\n\nconst banco = contexto.connector_nome ? \" \" + contexto.connector_nome : \"\";\nconst n = gravadas.length;\n\nconst partes = [];\n\nif (n === 0) {\n  partes.push(\n    \"Sincronizei sua conta\" + banco + \" e nao encontrei despesa nova para classificar.\",\n  );\n} else {\n  partes.push(\n    \"Prontinho! Conectei sua conta\" +\n      banco +\n      \" e classifiquei \" +\n      n +\n      (n === 1 ? \" despesa\" : \" despesas\") +\n      periodo(contexto.sincronizado_desde) +\n      \".\",\n  );\n\n  const linhas = [];\n  if (dedutiveis > 0) {\n    linhas.push(\n      \"\\u{2705} \" +\n        dedutiveis +\n        (dedutiveis === 1 ? \" potencialmente dedutivel\" : \" potencialmente dedutiveis\") +\n        \" (\" + brl(totalDedutivel) + \")\",\n    );\n  }\n  if (emRevisao > 0) {\n    linhas.push(\n      \"\\u{1F50E} \" +\n        emRevisao +\n        (emRevisao === 1 ? \" precisa\" : \" precisam\") +\n        \" de revisao do seu contador\",\n    );\n  }\n  const naoDedutiveis = n - dedutiveis - emRevisao;\n  if (naoDedutiveis > 0) {\n    linhas.push(\"\\u{1F4CC} \" + naoDedutiveis + \" sem efeito no IRPF\");\n  }\n  if (linhas.length > 0) partes.push(linhas.join(\"\\n\"));\n}\n\nif (contexto.lote_duplicadas > 0) {\n  const d = contexto.lote_duplicadas;\n  partes.push(\n    \"(\" + d + (d === 1 ? \" ja estava registrada\" : \" ja estavam registradas\") + \", entao pulei)\",\n  );\n}\n\npartes.push(\"Manda *resumo* para ver o detalhamento ou *dossie* para exportar em PDF.\");\n\nif (!contexto.telefone) {\n  throw new Error(\n    \"Classificacao gravada, mas o usuario nao tem telefone_whatsapp em usuarios: \" +\n      \"nao ha para onde mandar o resumo\",\n  );\n}\n\nreturn [{\n  json: {\n    telefone: contexto.telefone,\n    mensagem: partes.join(\"\\n\\n\"),\n    gravadas: n,\n    enviadas: contexto.total_enviadas,\n    duplicadas_no_insert: contexto.total_enviadas - n,\n    duplicadas_no_prefiltro: contexto.lote_duplicadas,\n    classificadas_por_ia: contexto.total_por_ia,\n    classificadas_por_prefiltro: contexto.total_por_prefiltro,\n  },\n}];"
+      },
+      "id": "a1f0c3d2-000f-4a10-9b21-0f1e2d3c4b50",
+      "name": "Montar Resumo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2140,
+        340
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $json.telefone, type: \"text\", text: { body: $json.mensagem } }) }}",
+        "options": {}
+      },
+      "id": "a1f0c3d2-0010-4a10-9b21-0f1e2d3c4b50",
+      "name": "WhatsApp - Enviar Resumo Consolidado",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2360,
+        340
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook - Transacoes Open Finance": {
+      "main": [
+        [
+          {
+            "node": "Preparar Lote",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Lote": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Resolver Item e Usuario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Resolver Item e Usuario": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Transacoes Ja Gravadas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Transacoes Ja Gravadas": {
+      "main": [
+        [
+          {
+            "node": "Montar Fila de Transacoes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Fila de Transacoes": {
+      "main": [
+        [
+          {
+            "node": "Precisa de Classificacao IA?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Precisa de Classificacao IA?": {
+      "main": [
+        [
+          {
+            "node": "Lotes para o Gemini",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Aplicar Pre-Filtro de Categoria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lotes para o Gemini": {
+      "main": [
+        [
+          {
+            "node": "Juntar Classificacoes",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gemini - Classificar Transacao",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini - Classificar Transacao": {
+      "main": [
+        [
+          {
+            "node": "Interpretar Resposta do Gemini",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Interpretar Resposta do Gemini": {
+      "main": [
+        [
+          {
+            "node": "Aguardar Entre Lotes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardar Entre Lotes": {
+      "main": [
+        [
+          {
+            "node": "Lotes para o Gemini",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aplicar Pre-Filtro de Categoria": {
+      "main": [
+        [
+          {
+            "node": "Juntar Classificacoes",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Juntar Classificacoes": {
+      "main": [
+        [
+          {
+            "node": "Montar Evidencias",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Evidencias": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Inserir Evidencias",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Inserir Evidencias": {
+      "main": [
+        [
+          {
+            "node": "Montar Resumo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar Resumo": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Enviar Resumo Consolidado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "6b1d0f4c-8a2e-4c19-b7d3-2e5f9a0c1d84",
+  "meta": {
+    "instanceId": "1f30e69034394336460f691b1eabbafddbdb2184a162149d350887b589d5a76c"
+  },
+  "id": "pQ7rMk2VtLxA9bZe",
+  "tags": []
+}

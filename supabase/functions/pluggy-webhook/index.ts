@@ -262,6 +262,11 @@ function normalizarTransacao(
     // O Pluggy devolve ISO completo; o schema guarda data_despesa como date.
     data_despesa: String(transacao.date).slice(0, 10),
     categoria_pluggy: transacao.category ?? null,
+    // O pre-filtro do workflow decide por este codigo, nao pelo rotulo acima:
+    // `categoryId` e hierarquico (os 2 primeiros digitos sao a categoria de
+    // topo) e estavel, enquanto `category` e texto de exibicao que a Pluggy
+    // pode renomear sem quebrar contrato nenhum.
+    categoria_pluggy_id: transacao.categoryId ?? null,
     estabelecimento: transacao.merchant?.name ?? transacao.merchant?.businessName ?? null,
     documento_prestador: transacao.merchant?.cnpj ?? null,
   };

@@ -41,6 +41,10 @@ export type PluggyTransaction = {
   amount: number;
   currencyCode?: string;
   category?: string | null;
+  // Codigo hierarquico e estavel da categoria (ex.: "18020000" = Pharmacy, sob
+  // "18000000" = Healthcare). O `category` acima e o rotulo de exibicao em
+  // ingles; quem precisa decidir algo pela categoria deve olhar o id.
+  categoryId?: string | null;
   status?: string;
   merchant?: { name?: string; businessName?: string; cnpj?: string } | null;
 };
@@ -82,20 +86,25 @@ export async function getPluggyApiKey(): Promise<string> {
   return data.apiKey;
 }
 
-async function pluggyGet<T>(path: string, params: Record<string, string> = {}): Promise<T> {
+async function pluggyGetUrl<T>(url: URL): Promise<T> {
   const apiKey = await getPluggyApiKey();
-  const url = new URL(`${PLUGGY_API_BASE}${path}`);
-  for (const [key, value] of Object.entries(params)) {
-    if (value) url.searchParams.set(key, value);
-  }
 
   const response = await fetch(url, { headers: { "X-API-KEY": apiKey } });
   if (!response.ok) {
-    console.error("pluggy request failed", path, response.status, await safeText(response));
+    console.error("pluggy request failed", url.pathname, response.status, await safeText(response));
     throw new Error(`pluggy_request_failed_${response.status}`);
   }
 
   return await response.json() as T;
+}
+
+function pluggyGet<T>(path: string, params: Record<string, string> = {}): Promise<T> {
+  const url = new URL(path, PLUGGY_API_BASE);
+  for (const [key, value] of Object.entries(params)) {
+    if (value) url.searchParams.set(key, value);
+  }
+
+  return pluggyGetUrl<T>(url);
 }
 
 export function fetchItem(itemId: string): Promise<PluggyItem> {
@@ -107,37 +116,84 @@ export async function fetchAccounts(itemId: string): Promise<PluggyAccount[]> {
   return data.results ?? [];
 }
 
-// Pagina ate o fim: /transactions e paginado e o default do Pluggy corta em
-// 20 itens. Uma sincronizacao inicial de 30 dias passa disso com folga, e
-// transacao perdida aqui nao reaparece — o proximo webhook usa `from` mais
-// recente e pula a janela antiga.
+// Pagina ate o fim.
+//
+// GET /transactions foi desativado: a API responde 410 ENDPOINT_DEPRECATED
+// (confirmado em chamada real contra o sandbox, nao inferido da doc). O
+// substituto e /v2/transactions, com duas diferencas que quebram em silencio
+// quem so troca o path:
+//   - paginacao por cursor, nao por page/pageSize. `pageSize`, `limit`, `size`,
+//     `take` e afins sao todos rejeitados com 400 "property X should not exist";
+//     a pagina e fixa em 500 e nao da para reduzir.
+//   - o filtro de data virou dateFrom/dateTo. Os antigos `from`/`to` tambem
+//     levam 400 "property from should not exist".
+//
+// Envelope: { results, next }. `next` e null quando acabou e, quando ha mais
+// pagina, e a query string relativa ja montada pela Pluggy
+// (?accountId=...&after=...), resolvida contra a URL da pagina atual.
+//
+// Ressalva de teste: o item sandbox tem 25 transacoes por conta e a pagina e
+// fixa em 500, entao nao ha como fazer o `next` vir preenchido ali. O caminho
+// de multiplas paginas so vai ser exercitado por uma conta real com mais de
+// 500 transacoes na janela — por isso ele aceita tanto query relativa quanto
+// URL absoluta, em vez de assumir um dos dois formatos.
+const PAGINAS_MAX = 40;
+
 export async function fetchTransactions(
   accountId: string,
   from?: string,
   to?: string,
 ): Promise<PluggyTransaction[]> {
-  const pageSize = 500;
   const transactions: PluggyTransaction[] = [];
-  let page = 1;
-  let totalPages = 1;
 
-  do {
-    const data = await pluggyGet<{ results?: PluggyTransaction[]; totalPages?: number }>(
-      "/transactions",
-      {
-        accountId,
-        from: from ?? "",
-        to: to ?? "",
-        page: String(page),
-        pageSize: String(pageSize),
-      },
-    );
+  const primeira = new URL("/v2/transactions", PLUGGY_API_BASE);
+  primeira.searchParams.set("accountId", accountId);
+  if (from) primeira.searchParams.set("dateFrom", from);
+  if (to) primeira.searchParams.set("dateTo", to);
+
+  let url: URL | null = primeira;
+  let paginas = 0;
+
+  while (url && paginas < PAGINAS_MAX) {
+    const data = await pluggyGetUrl<{ results?: PluggyTransaction[]; next?: string | null }>(url);
     transactions.push(...(data.results ?? []));
-    totalPages = data.totalPages ?? 1;
-    page += 1;
-  } while (page <= totalPages && page <= 20);
+    paginas += 1;
+    url = proximaPagina(data.next, url);
+  }
+
+  // Teto de 40 paginas x 500 = 20 mil transacoes por conta. Estourar isso e
+  // anormal, e transacao perdida aqui nao reaparece: a proxima sincronizacao
+  // usa um `from` mais recente e pula a janela antiga.
+  if (url) {
+    console.warn("paginacao de transacoes interrompida no teto de paginas", { accountId, paginas });
+  }
 
   return transactions;
+}
+
+function proximaPagina(next: string | null | undefined, atual: URL): URL | null {
+  if (!next) return null;
+
+  let proxima: URL;
+  try {
+    proxima = new URL(next, atual);
+  } catch {
+    console.warn("cursor `next` do Pluggy nao e uma URL valida; paginacao interrompida");
+    return null;
+  }
+
+  // O `next` vem do corpo da resposta e a requisicao seguinte carrega o
+  // X-API-KEY: aceitar outra origem aqui entregaria a chave a quem controlasse
+  // a resposta. Na pratica a Pluggy devolve query string relativa e esta guarda
+  // nunca dispara.
+  if (proxima.origin !== new URL(PLUGGY_API_BASE).origin) {
+    console.warn("cursor `next` aponta para origem inesperada; paginacao interrompida", {
+      origem: proxima.origin,
+    });
+    return null;
+  }
+
+  return proxima;
 }
 
 async function safeText(response: Response) {
