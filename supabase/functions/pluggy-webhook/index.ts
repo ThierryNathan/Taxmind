@@ -43,6 +43,23 @@ const env = (name: string, fallback = "") => Deno.env.get(name) ?? fallback;
 
 const JANELA_INICIAL_DIAS = 30;
 
+// Janela de agregacao dos eventos transactions/*, que o Pluggy dispara por
+// CONTA e nao por conexao. Medido em log real de invocacao: um item com tres
+// contas produz os tres webhooks num intervalo de ~1s a ~2s. A espera inicial
+// da folga sobre isso; depois dela a decisao passa a ser por estabilizacao, nao
+// por relogio, entao um agregador mais lento so atrasa a mensagem, nao a parte.
+const ESPERA_INICIAL_MS = 5000;
+// Intervalo entre duas contagens. Duas contagens iguais = o lote parou de
+// crescer. Comparar CONTAGEM em vez de timestamp e proposital: `criado_em` vem
+// do relogio do Postgres e a espera roda no relogio do runtime da Edge
+// Function; qualquer skew entre os dois quebraria uma comparacao de horario.
+const INTERVALO_ESTABILIZACAO_MS = 2500;
+// Teto absoluto. O worker da Edge Function e reciclado alguns segundos depois
+// do fim do waitUntil, entao a espera nao pode crescer sem limite.
+const ESPERA_MAX_MS = 15000;
+
+const TABELA_LOTES = "open_finance_lotes_pendentes";
+
 serve(async (request) => {
   if (request.method !== "POST") {
     return plainJson({ error: "method_not_allowed" }, 405);
@@ -249,16 +266,185 @@ async function processarTransacoesDaConta(
     return;
   }
 
-  console.log("transacoes encaminhadas ao n8n", {
+  console.log("lote de conta pronto", {
     itemId,
     account_id: accountId,
     conta_tipo: conta.type,
     origem,
     recebidas: transacoes.length,
-    encaminhadas: normalizadas.length,
+    normalizadas: normalizadas.length,
   });
 
-  await encaminharParaN8n({
+  await agregarEEncaminhar(itemId, usuarioId, accountId, origem, normalizadas);
+}
+
+type TransacaoNormalizada = NonNullable<ReturnType<typeof normalizarTransacao>>;
+
+/**
+ * Junta os eventos irmaos do mesmo item numa unica entrega ao n8n.
+ *
+ * O Pluggy dispara transactions/* por CONTA. Um item com conta corrente,
+ * poupanca e cartao gera tres webhooks quase simultaneos, e cada um cai numa
+ * invocacao ISOLADA desta function — nao ha estado em memoria que enxergue os
+ * irmaos. Como cada encaminhamento vira uma mensagem de WhatsApp, sem agregacao
+ * o usuario recebia tres confirmacoes seguidas em vez de uma com o total.
+ *
+ * O encontro acontece na tabela open_finance_lotes_pendentes (migration 007):
+ *   1. cada invocacao grava seu lote ja normalizado;
+ *   2. espera a janela e depois observa a CONTAGEM de pendentes do item ate ela
+ *      parar de crescer — o lote estabilizou;
+ *   3. todas disputam a reivindicacao com um UPDATE condicional. O Postgres
+ *      serializa os UPDATEs concorrentes e reavalia `consumido_em is null`,
+ *      entao exatamente uma invocacao leva as linhas e as demais levam zero.
+ *
+ * Sem regressao para conexao de uma conta so: com um unico evento o passo 2
+ * estabiliza na primeira contagem e o passo 3 devolve aquele unico lote. O
+ * envelope entregue e identico ao de antes — o workflow n8n nao muda.
+ */
+async function agregarEEncaminhar(
+  itemId: string,
+  usuarioId: string,
+  accountId: string,
+  origem: string,
+  normalizadas: TransacaoNormalizada[],
+) {
+  const { error: erroInsert } = await supabaseAdmin.from(TABELA_LOTES).insert({
+    usuario_id: usuarioId,
+    pluggy_item_id: itemId,
+    account_id: accountId,
+    origem,
+    transacoes: normalizadas,
+  });
+
+  if (erroInsert) {
+    // Degradacao segura: sem o buffer, volta ao comportamento anterior de
+    // encaminhar direto. Melhor tres mensagens do que transacao perdida.
+    console.error("falha ao bufferizar lote; encaminhando sem agregar", erroInsert);
+    await encaminharParaN8n(envelopeParaN8n(usuarioId, itemId, normalizadas));
+    return;
+  }
+
+  await esperarLoteEstabilizar(itemId);
+
+  const { data: lotes, error: erroClaim } = await supabaseAdmin
+    .from(TABELA_LOTES)
+    .update({ consumido_em: new Date().toISOString() })
+    .eq("pluggy_item_id", itemId)
+    .is("consumido_em", null)
+    .select("id, account_id, transacoes");
+
+  if (erroClaim) {
+    console.error("falha ao reivindicar lotes pendentes", erroClaim);
+    return;
+  }
+
+  if (!lotes || lotes.length === 0) {
+    // Outra invocacao irma ja levou o lote consolidado — inclusive o nosso.
+    console.log("lote ja reivindicado por outra invocacao", { itemId, account_id: accountId });
+    return;
+  }
+
+  const transacoes = juntarSemRepetir(lotes);
+  console.log("transacoes encaminhadas ao n8n", {
+    itemId,
+    origem,
+    contas_agregadas: lotes.length,
+    contas: lotes.map((l) => l.account_id),
+    encaminhadas: transacoes.length,
+  });
+
+  const ok = await encaminharParaN8n(envelopeParaN8n(usuarioId, itemId, transacoes));
+
+  if (!ok) {
+    // Devolve os lotes para a fila. Isso pode gerar um reenvio depois, e o n8n
+    // deduplica reenvio; o que ele nao faz e recuperar lote que ficou marcado
+    // como consumido sem nunca ter sido entregue.
+    const { error } = await supabaseAdmin
+      .from(TABELA_LOTES)
+      .update({ consumido_em: null })
+      .in("id", lotes.map((l) => l.id));
+    if (error) console.error("falha ao devolver lotes para a fila", error);
+    else console.warn("lotes devolvidos para a fila apos falha no n8n", { itemId });
+    return;
+  }
+
+  await limparLotesAntigos();
+}
+
+/**
+ * Espera o lote parar de crescer.
+ *
+ * Duas contagens consecutivas iguais significam que nenhum irmao novo chegou no
+ * intervalo. Contagem e nao horario de proposito: `criado_em` e do relogio do
+ * Postgres e esta espera roda no relogio do runtime, e skew entre os dois
+ * tornaria uma comparacao de timestamp silenciosamente errada.
+ */
+async function esperarLoteEstabilizar(itemId: string) {
+  const inicio = Date.now();
+  await dormir(ESPERA_INICIAL_MS);
+
+  let anterior = -1;
+  while (Date.now() - inicio < ESPERA_MAX_MS) {
+    const atual = await contarPendentes(itemId);
+
+    // Zero pendentes: outra invocacao ja reivindicou tudo. Sai agora e deixa o
+    // UPDATE condicional confirmar — nao ha o que esperar.
+    if (atual === 0) return;
+    if (atual === anterior) return;
+
+    anterior = atual;
+    await dormir(INTERVALO_ESTABILIZACAO_MS);
+  }
+
+  console.warn("teto de espera da janela de agregacao atingido", { itemId });
+}
+
+async function contarPendentes(itemId: string): Promise<number> {
+  const { count, error } = await supabaseAdmin
+    .from(TABELA_LOTES)
+    .select("id", { count: "exact", head: true })
+    .eq("pluggy_item_id", itemId)
+    .is("consumido_em", null);
+
+  if (error) {
+    console.error("falha ao contar lotes pendentes", error);
+    // -1 nunca casa com a contagem anterior, entao o erro faz esperar mais uma
+    // rodada em vez de encerrar a janela cedo.
+    return -1;
+  }
+
+  return count ?? 0;
+}
+
+/**
+ * Achata os lotes reivindicados numa lista so.
+ *
+ * A repeticao por `transaction_id` acontece de verdade: transactions/created e
+ * transactions/updated da mesma conta podem cair na mesma janela e trazer a
+ * mesma transacao. O n8n ja deduplica contra o banco, mas mandar a repetida
+ * duas vezes no mesmo POST pagaria classificacao de IA duas vezes.
+ */
+function juntarSemRepetir(lotes: Array<{ transacoes: unknown }>): TransacaoNormalizada[] {
+  const porId = new Map<string, TransacaoNormalizada>();
+
+  for (const lote of lotes) {
+    const transacoes = Array.isArray(lote.transacoes)
+      ? lote.transacoes as TransacaoNormalizada[]
+      : [];
+    for (const transacao of transacoes) {
+      if (transacao?.transaction_id) porId.set(transacao.transaction_id, transacao);
+    }
+  }
+
+  return [...porId.values()];
+}
+
+function envelopeParaN8n(
+  usuarioId: string,
+  itemId: string,
+  transacoes: TransacaoNormalizada[],
+) {
+  return {
     source: "pluggy-open-finance",
     event_type: "transacoes_sincronizadas",
     usuario_id: usuarioId,
@@ -267,10 +453,26 @@ async function processarTransacoesDaConta(
     // texto do periodo, e le como YYYY-MM-DD. Aqui nao existe janela de item,
     // entao a data mais antiga do proprio lote e o piso correto: nao adianta
     // procurar duplicata antes da transacao mais velha que chegou.
-    sincronizado_desde: pisoDeData(normalizadas),
-    total: normalizadas.length,
-    transacoes: normalizadas,
-  });
+    sincronizado_desde: pisoDeData(transacoes),
+    total: transacoes.length,
+    transacoes,
+  };
+}
+
+// Limpeza oportunista. A linha e transitoria (segundos), entao qualquer coisa
+// com mais de uma hora ou ja foi entregue ou ficou orfa de uma invocacao que
+// morreu antes de reivindicar. A folga de uma hora e enorme perto da janela de
+// 15s, entao nao ha risco de apagar lote em voo.
+const RETENCAO_LOTES_MS = 60 * 60 * 1000;
+
+async function limparLotesAntigos() {
+  const limite = new Date(Date.now() - RETENCAO_LOTES_MS).toISOString();
+  const { error } = await supabaseAdmin.from(TABELA_LOTES).delete().lt("criado_em", limite);
+  if (error) console.error("falha na limpeza de lotes antigos", error);
+}
+
+function dormir(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function pisoDeData(normalizadas: Array<{ data_despesa: string }>) {
@@ -484,20 +686,31 @@ async function registrarErroDoItem(itemId: string, erro: { code?: string; messag
   }
 }
 
-async function encaminharParaN8n(payload: unknown) {
+// Devolve se a entrega deu certo, para que a janela de agregacao possa
+// desfazer a reivindicacao e nao perder o lote. O caminho de item/updated
+// ignora o retorno, como antes.
+async function encaminharParaN8n(payload: unknown): Promise<boolean> {
   const url = env("N8N_OPENFINANCE_WEBHOOK_URL");
   if (!url) {
     console.warn("N8N_OPENFINANCE_WEBHOOK_URL nao configurada; transacoes nao encaminhadas");
-    return;
+    return false;
   }
 
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
 
-  if (!response.ok) {
-    console.error("falha ao encaminhar transacoes ao n8n", response.status, await response.text());
+    if (!response.ok) {
+      console.error("falha ao encaminhar transacoes ao n8n", response.status, await response.text());
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.error("erro de rede ao encaminhar transacoes ao n8n", error);
+    return false;
   }
 }

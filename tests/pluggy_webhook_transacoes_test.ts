@@ -29,9 +29,14 @@ const TEM_CREDENCIAIS = Boolean(
   Deno.env.get("PLUGGY_CLIENT_ID") && Deno.env.get("PLUGGY_CLIENT_SECRET"),
 );
 
-// Item sandbox real, com conta corrente, poupanca e cartao Dinners.
+// Item sandbox real, com conta corrente, poupanca e cartao de credito.
+//
+// Item de sandbox do Pluggy tem vida curta: os dois anteriores usados aqui
+// passaram a responder 404 depois de alguns dias. Quando isso acontecer, crie
+// outra conexao e passe o id novo em PLUGGY_TEST_ITEM_ID em vez de editar aqui
+// — `contasDoItem` falha com a instrucao explicita.
 const ITEM_ID = Deno.env.get("PLUGGY_TEST_ITEM_ID") ??
-  "50c167a8-6217-4f33-9a17-37d22a282c7b";
+  "aa222c1a-1d0a-456e-94f0-6fc5082c4129";
 
 const SUPABASE_ORIGIN = "http://supabase.test";
 const N8N_URL = "http://n8n.test/webhook/openfinance-transacoes";
@@ -60,6 +65,8 @@ const db: Record<string, Linha[]> = {
     },
   ],
   usuarios: [{ id: USUARIO_ID }],
+  // Buffer da janela de agregacao (migration 007).
+  open_finance_lotes_pendentes: [],
 };
 
 const capturado = { n8n: [] as Array<Record<string, any>> };
@@ -67,6 +74,7 @@ const capturado = { n8n: [] as Array<Record<string, any>> };
 function resetCaptura() {
   capturado.n8n = [];
   db.open_finance_items[0].ultima_sincronizacao_em = null;
+  db.open_finance_lotes_pendentes = [];
 }
 
 function filtrar(tabela: string, url: URL): Linha[] {
@@ -75,7 +83,16 @@ function filtrar(tabela: string, url: URL): Linha[] {
     if (["select", "order", "limit", "offset"].includes(chave)) continue;
     const [op, ...resto] = String(bruto).split(".");
     const valor = resto.join(".");
+
     if (op === "eq") linhas = linhas.filter((l) => String(l[chave]) === valor);
+    else if (op === "is" && valor === "null") linhas = linhas.filter((l) => l[chave] == null);
+    else if (op === "not") linhas = linhas.filter((l) => l[chave] != null);
+    else if (op === "lt") linhas = linhas.filter((l) => String(l[chave]) < valor);
+    else if (op === "in") {
+      // formato do PostgREST: in.("a","b")
+      const lista = valor.replace(/^\(|\)$/g, "").split(",").map((v) => v.replace(/^"|"$/g, ""));
+      linhas = linhas.filter((l) => lista.includes(String(l[chave])));
+    }
   }
   return linhas;
 }
@@ -89,6 +106,22 @@ function respostaSupabase(url: URL, init?: RequestInit): Response {
   // supabase-js entregar um array onde a function espera uma linha.
   const querObjeto = (new Headers(init?.headers ?? {}).get("accept") ?? "")
     .includes("pgrst.object+json");
+
+  // select(..., { count: "exact", head: true }) vira um HEAD; o supabase-js le
+  // a contagem do header content-range, nao do corpo.
+  if (metodo === "HEAD") {
+    const total = filtrar(tabela, url).length;
+    return new Response(null, {
+      status: 200,
+      headers: { "content-range": `0-${Math.max(total - 1, 0)}/${total}` },
+    });
+  }
+
+  if (metodo === "DELETE") {
+    const alvos = new Set(filtrar(tabela, url));
+    db[tabela] = db[tabela].filter((l) => !alvos.has(l));
+    return Response.json([]);
+  }
 
   if (metodo === "GET") {
     const linhas = filtrar(tabela, url);
@@ -109,8 +142,18 @@ function respostaSupabase(url: URL, init?: RequestInit): Response {
   }
 
   if (metodo === "POST") {
-    // upsert de open_finance_items com onConflict: pluggy_item_id
     for (const nova of (Array.isArray(corpo) ? corpo : [corpo]) as Linha[]) {
+      if (tabela === "open_finance_lotes_pendentes") {
+        // Insert simples, com os defaults que a migration 007 define.
+        db[tabela].push({
+          id: crypto.randomUUID(),
+          criado_em: new Date().toISOString(),
+          consumido_em: null,
+          ...nova,
+        });
+        continue;
+      }
+      // upsert de open_finance_items com onConflict: pluggy_item_id
       const existente = db[tabela].find((l) => l.pluggy_item_id === nova.pluggy_item_id);
       if (existente) Object.assign(existente, nova);
       else db[tabela].push(nova);
@@ -179,6 +222,14 @@ async function enviarEvento(
   return resposta.status;
 }
 
+const dormirTeste = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Quanto esperar DEPOIS do primeiro encaminhamento antes de afirmar que nao
+// veio um segundo. Precisa cobrir a janela inteira da function (espera inicial
+// de 5s + ciclos de estabilizacao de 2,5s), senao o teste "so veio 1" passaria
+// simplesmente por ter olhado cedo demais.
+const ESPERA_APOS_PRIMEIRO_MS = 12000;
+
 // O processamento roda fora da resposta (waitUntil em producao, promise solta
 // aqui). Espera o efeito observavel em vez de dormir um tempo fixo.
 async function esperar(condicao: () => boolean, ms = 45000) {
@@ -200,8 +251,16 @@ let contasCache: Conta[] | null = null;
 async function contasDoItem(): Promise<Conta[]> {
   if (!contasCache) {
     const dados = await pluggyGet<{ results: Conta[] }>(`/accounts?itemId=${ITEM_ID}`);
-    contasCache = dados.results;
+    contasCache = dados.results ?? [];
   }
+  // Item de sandbox apagado responde 200 com lista vazia, nao 404. Sem esta
+  // guarda a suite falharia com "esperado 3, recebido 0", que parece bug de
+  // codigo quando na verdade e o item que sumiu.
+  assert(
+    contasCache.length > 0,
+    `item sandbox ${ITEM_ID} nao tem contas (provavelmente foi apagado do Pluggy). ` +
+      `Crie outra conexao e rode com PLUGGY_TEST_ITEM_ID=<novo id>.`,
+  );
   return contasCache;
 }
 
@@ -558,5 +617,122 @@ Deno.test({
       await esperar(() => capturado.n8n.length > 0, 4000);
       assertEquals(capturado.n8n.length, 0, "evento com header errado nao pode chegar ao n8n");
     }
+  },
+});
+
+// --- janela de agregacao (migration 007) ----------------------------------
+//
+// O Pluggy dispara transactions/* por CONTA. Sem agregacao, um item com tres
+// contas gerava tres encaminhamentos ao n8n e portanto tres mensagens de
+// WhatsApp seguidas ("25 despesas", "25 despesas", "23 despesas") em vez de uma
+// dizendo 73.
+
+Deno.test({
+  name: "agregacao: tres eventos irmaos viram UM encaminhamento consolidado",
+  ignore: !TEM_CREDENCIAIS,
+  fn: async () => {
+    const contas = await contasDoItem();
+    assertEquals(contas.length, 3, "o item sandbox precisa ter 3 contas para este teste");
+    resetCaptura();
+
+    // Disparados em sequencia sem esperar o processamento: cada POST responde
+    // na hora e o trabalho corre em background, exatamente como os webhooks
+    // reais do Pluggy, que chegam com ~1s a ~2s de intervalo.
+    for (const conta of contas) {
+      assertEquals(
+        await enviarEvento({
+          event: "transactions/created",
+          itemId: ITEM_ID,
+          accountId: conta.id,
+          transactionsCreatedAtFrom: "2020-01-01T00:00:00.000Z",
+        }),
+        200,
+      );
+    }
+
+    assert(await esperar(() => capturado.n8n.length > 0), "nada chegou ao n8n");
+
+    // Depois do primeiro encaminhamento, espera mais um ciclo inteiro de janela
+    // para provar que NAO vem um segundo (nem um terceiro) atras.
+    await dormirTeste(ESPERA_APOS_PRIMEIRO_MS);
+
+    assertEquals(
+      capturado.n8n.length,
+      1,
+      `esperado 1 encaminhamento consolidado, veio ${capturado.n8n.length}`,
+    );
+
+    const envelope = capturado.n8n[0];
+    const contasNoEnvelope = new Set(
+      envelope.transacoes.map((t: { account_id: string }) => t.account_id),
+    );
+    console.log(
+      `  total=${envelope.total} | contas no envelope=${contasNoEnvelope.size} | encaminhamentos=${capturado.n8n.length}`,
+    );
+
+    assertEquals(contasNoEnvelope.size, 3, "o envelope deveria conter as 3 contas");
+    assertEquals(envelope.total, envelope.transacoes.length);
+    // 25 (poupanca) + 25 (corrente) + 23 (cartao, so DEBIT) = 73
+    assertEquals(envelope.total, 73);
+    // Contrato inalterado: o workflow n8n nao muda.
+    assertEquals(envelope.event_type, "transacoes_sincronizadas");
+    assertEquals(envelope.usuario_id, USUARIO_ID);
+    assert(/^\d{4}-\d{2}-\d{2}$/.test(envelope.sincronizado_desde));
+
+    // Sem transaction_id repetido no mesmo POST.
+    const ids = envelope.transacoes.map((t: { transaction_id: string }) => t.transaction_id);
+    assertEquals(new Set(ids).size, ids.length, "houve transaction_id repetido no envelope");
+  },
+});
+
+Deno.test({
+  name: "agregacao: conta unica nao regride — segue um encaminhamento so",
+  ignore: !TEM_CREDENCIAIS,
+  fn: async () => {
+    const cartao = await contaCartao();
+    resetCaptura();
+
+    assertEquals(
+      await enviarEvento({
+        event: "transactions/created",
+        itemId: ITEM_ID,
+        accountId: cartao.id,
+        transactionsCreatedAtFrom: "2020-01-01T00:00:00.000Z",
+      }),
+      200,
+    );
+
+    assert(await esperar(() => capturado.n8n.length > 0), "evento de conta unica nao chegou ao n8n");
+    await dormirTeste(ESPERA_APOS_PRIMEIRO_MS);
+
+    assertEquals(capturado.n8n.length, 1);
+    const envelope = capturado.n8n[0];
+    assertEquals(envelope.total, 23);
+    assert(
+      envelope.transacoes.every((t: { account_id: string }) => t.account_id === cartao.id),
+      "envelope de conta unica trouxe transacao de outra conta",
+    );
+    console.log(`  conta unica -> total=${envelope.total}, encaminhamentos=${capturado.n8n.length}`);
+  },
+});
+
+Deno.test({
+  name: "agregacao: o buffer fica limpo depois do encaminhamento",
+  ignore: !TEM_CREDENCIAIS,
+  fn: async () => {
+    const cartao = await contaCartao();
+    resetCaptura();
+
+    await enviarEvento({
+      event: "transactions/created",
+      itemId: ITEM_ID,
+      accountId: cartao.id,
+      transactionsCreatedAtFrom: "2020-01-01T00:00:00.000Z",
+    });
+    assert(await esperar(() => capturado.n8n.length > 0));
+    await dormirTeste(1500);
+
+    const pendentes = db.open_finance_lotes_pendentes.filter((l) => l.consumido_em == null);
+    assertEquals(pendentes.length, 0, "sobrou lote pendente sem dono depois do encaminhamento");
   },
 });

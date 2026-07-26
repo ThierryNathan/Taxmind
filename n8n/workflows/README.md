@@ -127,6 +127,40 @@ a consulta de deduplicacao. `ultima_sincronizacao_em` **nao** e avancada por
 evento de conta: ela e a janela do item inteiro, e move-la a partir de uma conta
 so faria as demais pularem transacao.
 
+### Janela de agregacao: N contas, UMA mensagem
+
+Os eventos `transactions/*` sao por **conta**. Uma conexao com conta corrente,
+poupanca e cartao dispara tres webhooks em ~1s a ~2s, e cada um cai numa
+invocacao **isolada** da Edge Function. Como o workflow manda uma mensagem de
+WhatsApp por execucao, isso produzia tres confirmacoes seguidas — "25 despesas",
+"25 despesas", "23 despesas" — em vez de uma dizendo 73.
+
+A `pluggy-webhook` agora agrega antes de encaminhar, usando a tabela
+`open_finance_lotes_pendentes` (migration 007) como ponto de encontro entre as
+invocacoes:
+
+1. cada evento grava seu lote ja normalizado no buffer;
+2. espera ~5s e depois observa a **contagem** de lotes pendentes do item ate ela
+   parar de crescer (contagem, e nao timestamp: o `criado_em` e do relogio do
+   Postgres e a espera roda no relogio do runtime da Edge Function);
+3. todas disputam um `UPDATE ... WHERE consumido_em IS NULL RETURNING`. O
+   Postgres serializa os UPDATEs concorrentes e reavalia o predicado, entao
+   exatamente uma invocacao leva as linhas e encaminha; as demais levam zero
+   linhas e saem em silencio.
+
+**Do lado do n8n nao muda nada:** o envelope entregue e o mesmo, so que com as
+transacoes das N contas juntas e `total` somado. Conexao de uma conta so
+continua gerando um encaminhamento, apenas ~5s mais tarde.
+
+Efeito colateral util: transacao repetida entre `transactions/created` e
+`transactions/updated` da mesma janela e desduplicada por `transaction_id`
+**antes** do POST, entao o pre-filtro e o Gemini nao veem a mesma transacao
+duas vezes no mesmo lote.
+
+Se o buffer falhar (erro de insert), a function encaminha direto, sem agregar —
+degradacao para o comportamento antigo. Tres mensagens e um problema de UX;
+transacao perdida e um problema de dado.
+
 Nota sobre `transactions/created`: o evento traz um `createdTransactionsLink`
 pronto, que a Edge Function **nao** usa. O link aponta para a colecao
 `/transactions`, desativada (410 `ENDPOINT_DEPRECATED`); a consulta e remontada
