@@ -6,7 +6,7 @@ Versao n8n alvo: a definir no primeiro ambiente Docker da Oracle Cloud VM.
 
 ## Contrato de entrada
 
-Os workflows recebem eventos encaminhados por `supabase/functions/whatsapp-webhook`
+Os workflows recebem eventos encaminhados por `supabase/functions/whatsapp-webhook` (deprecado)
 com o formato:
 
 ```json
@@ -34,7 +34,7 @@ com o formato:
 
 ## Roteamento na origem
 
-A `whatsapp-webhook` escolhe o workflow de destino por `message_type`:
+A `whatsapp-webhook` (deprecado) escolhe o workflow de destino por `message_type`:
 
 | message_type | Variavel de ambiente | Workflow |
 | --- | --- | --- |
