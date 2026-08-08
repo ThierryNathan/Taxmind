@@ -430,6 +430,38 @@ Deno.test("reclassificacao que continua pedindo revisao nao promove", async () =
   assertEquals(recibo().requer_revisao_humana, true);
 });
 
+Deno.test("reclassificacao contraditoria nao promove: quem manda e a derivacao", async () => {
+  // A analise nova diz que nao precisa de revisao E ao mesmo tempo declara para
+  // onde iria se o prestador fosse identificado — que continua sem documento e
+  // sem estabelecimento. Sao afirmacoes incompativeis, e a leitura conservadora
+  // e a segunda: ainda falta identificar.
+  //
+  // A distincao so existe porque a lista deixou de vir da IA. Com o
+  // campos_bloqueantes vazio abaixo, o codigo anterior teria promovido.
+  semear();
+  respostaGemini = blocoExpense({
+    categoria: "SAUDE",
+    deducibilidade: "INDETERMINADO",
+    estabelecimento: null,
+    documento_prestador: null,
+    requer_revisao_humana: false,
+    motivos_revisao: [],
+    campos_bloqueantes: [],
+    deducibilidade_se_desbloqueado: "DEDUTIVEL",
+  });
+
+  const { corpo } = await resolver({
+    followup_id: FOLLOWUP_ID,
+    usuario_id: USUARIO_ID,
+    texto: "foi uma consulta mesmo, mas nao tenho papel nenhum aqui",
+  });
+
+  assertEquals(corpo.resolvido, true);
+  assertEquals(corpo.promovido, false);
+  assertEquals(recibo().status, "REVISAO_HUMANA");
+  assertEquals(recibo().metadados_ia.campos_bloqueantes, ["documento_prestador"]);
+});
+
 Deno.test("mensagem sem relacao nao mexe no recibo nem fecha a pendencia", async () => {
   semear();
   respostaGemini = "SEM_RELACAO";

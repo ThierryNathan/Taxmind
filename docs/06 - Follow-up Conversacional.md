@@ -16,21 +16,60 @@ que e bloqueante de proposito por ser um gate unico no cadastro.
 
 ## Quando a pergunta acontece
 
-Nunca por ambiguidade fiscal. So quando a propria IA declara, no campo novo
-`campos_bloqueantes`, que aquele dado **sozinho** destravaria a aprovacao:
+Nunca por ambiguidade fiscal. A decisao tem duas metades, e so uma delas e da
+IA:
 
-| Situacao | `campos_bloqueantes` | Pergunta? |
-| --- | --- | --- |
-| Falta o CNPJ da clinica, resto ok | `["documento_prestador"]` | Sim |
-| Falta saber onde foi, resto ok | `["estabelecimento"]` | Sim |
-| Uso misto pessoal/profissional | `[]` | Nao |
-| Possivel reembolso pelo plano | `[]` | Nao |
-| OCR ruim, valores contraditorios | `[]` | Nao |
+1. **A IA declara o destino**, em `deducibilidade_se_desbloqueado`: se o usuario
+   dissesse agora quem foi o prestador, a despesa ficaria aprovavel? Preenchido
+   (`DEDUTIVEL` / `PARCIALMENTE_DEDUTIVEL`) quer dizer sim; `null` quer dizer que
+   sobra motivo que nenhuma resposta objetiva resolve.
+2. **O codigo deriva o campo**, olhando quais dos dois campos de identificacao —
+   `documento_prestador` e `estabelecimento` — sairam vazios da extracao.
+   `documento_prestador` tem precedencia, por ser o unico verificavel sem IA.
 
-`deducibilidade_se_desbloqueado` acompanha: e ela que diz para onde a despesa
-vai quando o ultimo campo bloqueante for preenchido. Sem esse campo a promocao
-teria que adivinhar dedutibilidade fiscal, e adivinhar ali significa afirmar
-algo que ninguem analisou.
+| Situacao | Destino declarado | Campo derivado | Pergunta? |
+| --- | --- | --- | --- |
+| Falta o CNPJ da clinica, resto ok | `DEDUTIVEL` | `["documento_prestador"]` | Sim |
+| Falta saber onde foi, resto ok | `DEDUTIVEL` | `["estabelecimento"]` | Sim |
+| Falta CNPJ **e** estabelecimento | `DEDUTIVEL` | `["documento_prestador"]` | Sim |
+| Uso misto pessoal/profissional | `null` | `[]` | Nao |
+| Possivel reembolso pelo plano | `null` | `[]` | Nao |
+| OCR ruim, valores contraditorios | `null` | `[]` | Nao |
+
+O mesmo `deducibilidade_se_desbloqueado` diz para onde a despesa vai quando o
+campo for preenchido. Sem ele a promocao teria que adivinhar dedutibilidade
+fiscal, e adivinhar ali significa afirmar algo que ninguem analisou.
+
+### Por que a lista deixou de ser um campo da IA
+
+Ate a correcao existia um campo `campos_bloqueantes` na resposta do modelo,
+definido como "o subconjunto de `campos_ausentes` que, preenchido **sozinho**,
+removeria a revisao". A definicao e irrealizavel na linha 3 da tabela: faltando
+os dois campos, nenhum deles sozinho satisfaz, e o modelo devolvia `[]`
+obedecendo a regra ao pe da letra. O `Tem Campo Bloqueante?` nao criava
+pendencia e o follow-up nunca disparava — em despesas de saude escritas do jeito
+mais comum, "paguei 600 no proctologista", sem lugar e sem documento.
+
+Medido contra o Gemini real na temperatura de producao: **10/10 execucoes com a
+lista vazia** nessa mensagem, contra **6/6 preenchida** na mesma despesa com o
+estabelecimento citado. Erro sistematico do desenho, nao variacao do modelo.
+
+A correcao nao foi reescrever a regra, e sim tirar do modelo o que nunca foi
+juizo dele. "Qual campo esta vazio" e fato da extracao, verificavel em codigo;
+"identificar o prestador resolve o caso" e juizo fiscal, e continua com a IA num
+campo so. Com um campo no lugar de dois, some a possibilidade de os dois se
+contradizerem — que era exatamente o sintoma: `campos_ausentes`,
+`motivos_revisao` e `pergunta_de_followup` apontando o documento enquanto
+`campos_bloqueantes` vinha vazio na mesma resposta.
+
+A lista derivada tem no maximo **um** campo. A regra fiscal de SAUDE pede
+"identificacao do prestador **ou** estabelecimento", entao o CNPJ ja satisfaz o
+requisito inteiro; e o follow-up so pergunta uma coisa, logo uma lista maior
+nunca esvaziaria e a promocao ficaria esperando resposta que ninguem pediu.
+
+Testes: `tests/n8n_campos_bloqueantes_test.ts` (derivacao e paridade entre as
+duas copias) e `tests/prompt_gemini_test.ts` (consistencia entre execucoes
+contra o Gemini real).
 
 ## Onde a pendencia vive
 

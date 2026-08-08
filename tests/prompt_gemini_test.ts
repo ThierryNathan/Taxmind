@@ -17,6 +17,7 @@
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  derivarCamposBloqueantes,
   montarContextoReclassificacao,
   perguntaParaCampo,
 } from "../supabase/functions/_shared/followup.ts";
@@ -173,18 +174,18 @@ Deno.test("despesa dedutivel nao e apresentada como dinheiro de volta", comChave
 
 // --- Fase 13: campos bloqueantes e reclassificacao ------------------------
 
-Deno.test("falta so o documento: campo bloqueante declarado e destino da promocao", comChave, async () => {
+Deno.test("falta so o documento: destino declarado e campo derivado", comChave, async () => {
   const { mensagemUsuario, expense } = await classificar(
     "consulta com a dermatologista dra ana, clinica Vida, R$ 450",
   );
 
   assertEquals(expense.requer_revisao_humana, true);
-  assertEquals(expense.campos_bloqueantes, ["documento_prestador"]);
-  // Sem este campo a promocao teria que adivinhar a deducibilidade.
+  // A IA declara so o destino; a lista de campos e derivada do que ficou vazio.
   assert(
     ["DEDUTIVEL", "PARCIALMENTE_DEDUTIVEL"].includes(expense.deducibilidade_se_desbloqueado),
     JSON.stringify(expense.deducibilidade_se_desbloqueado),
   );
+  assertEquals(derivarCamposBloqueantes(expense), ["documento_prestador"]);
 
   // A pergunta e anexada pelo backend, junto com a pendencia. Se a IA
   // perguntasse por conta propria, o usuario responderia para o vazio.
@@ -194,14 +195,51 @@ Deno.test("falta so o documento: campo bloqueante declarado e destino da promoca
 
 Deno.test("revisao por motivo subjetivo nao vira campo bloqueante", comChave, async () => {
   // Uso misto pessoal/profissional nao se resolve com resposta objetiva: e
-  // decisao de contador. Perguntar aqui seria atrito sem desfecho.
+  // decisao de contador. Perguntar aqui seria atrito sem desfecho. O documento
+  // do prestador esta vazio, entao quem segura a pergunta e o destino null — a
+  // derivacao nao tem como saber sozinha que o motivo e subjetivo.
   const { expense } = await classificar(
     "paguei 180 de internet residencial da Vivo, uso pra trabalhar tambem",
   );
 
   assertEquals(expense.requer_revisao_humana, true);
-  assertEquals(expense.campos_bloqueantes, []);
   assertEquals(expense.deducibilidade_se_desbloqueado, null);
+  assertEquals(derivarCamposBloqueantes(expense), []);
+});
+
+// Regressao da despesa de saude sem NENHUMA identificacao: nem documento nem
+// estabelecimento. Era o caso que o desenho anterior nao cobria — a definicao
+// pedia o campo que SOZINHO destravaria, e faltando os dois nenhum satisfazia.
+// Medido antes da mudanca: 10/10 execucoes com campos_bloqueantes vazio, e
+// nenhum follow-up disparado.
+//
+// Roda a mesma mensagem varias vezes de proposito: o ponto do teste nao e "deu
+// certo uma vez", e sim que a saida nao oscila entre execucoes.
+Deno.test("saude sem documento e sem estabelecimento: destino estavel entre execucoes", comChave, async () => {
+  const EXECUCOES = 5;
+  const resultados = await Promise.all(
+    Array.from({ length: EXECUCOES }, () => classificar("Paguei 600 no proctologista")),
+  );
+
+  for (const [i, { expense }] of resultados.entries()) {
+    const contexto = `execucao ${i}: ${
+      JSON.stringify({
+        destino: expense.deducibilidade_se_desbloqueado,
+        estabelecimento: expense.estabelecimento,
+        documento: expense.documento_prestador,
+        ausentes: expense.campos_ausentes,
+      })
+    }`;
+
+    assertEquals(expense.categoria, "SAUDE", contexto);
+    assertEquals(expense.requer_revisao_humana, true, contexto);
+    assert(
+      ["DEDUTIVEL", "PARCIALMENTE_DEDUTIVEL"].includes(expense.deducibilidade_se_desbloqueado),
+      contexto,
+    );
+    // documento_prestador tem precedencia: e o unico verificavel sem IA.
+    assertEquals(derivarCamposBloqueantes(expense), ["documento_prestador"], contexto);
+  }
 });
 
 const RECIBO_PENDENTE = {
@@ -235,10 +273,10 @@ Deno.test("resposta em texto livre reclassifica sem reescrever valor e data", co
   // a analise honesta continua pedindo revisao.
   assert(
     expense.requer_revisao_humana === true ||
-      expense.campos_bloqueantes?.includes("documento_prestador"),
+      derivarCamposBloqueantes(expense).includes("documento_prestador"),
     JSON.stringify({
       revisao: expense.requer_revisao_humana,
-      bloqueantes: expense.campos_bloqueantes,
+      destino: expense.deducibilidade_se_desbloqueado,
     }),
   );
 });

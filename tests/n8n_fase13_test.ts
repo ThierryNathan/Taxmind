@@ -73,7 +73,6 @@ function expense(overrides: Record<string, unknown> = {}) {
     requer_revisao_humana: true,
     motivos_revisao: ["Falta documento do prestador"],
     campos_ausentes: ["documento_prestador"],
-    campos_bloqueantes: ["documento_prestador"],
     deducibilidade_se_desbloqueado: "DEDUTIVEL",
     ...overrides,
   };
@@ -121,7 +120,6 @@ Deno.test("despesa aprovada automaticamente nao ganha pergunta", async () => {
   const saida = await montarPayload(expense({
     requer_revisao_humana: false,
     motivos_revisao: [],
-    campos_bloqueantes: [],
     deducibilidade: "DEDUTIVEL",
     deducibilidade_se_desbloqueado: null,
   }));
@@ -134,10 +132,10 @@ Deno.test("despesa aprovada automaticamente nao ganha pergunta", async () => {
 
 Deno.test("revisao por motivo nao respondivel nao vira pergunta", async () => {
   // Uso misto, reembolso, ambiguidade de categoria: nenhuma resposta objetiva
-  // do usuario resolve, entao a IA deixa campos_bloqueantes vazio.
+  // do usuario resolve, entao a IA deixa o destino nulo — e e o destino nulo
+  // que segura a pergunta, ja que o documento continua vazio.
   const saida = await montarPayload(expense({
     motivos_revisao: ["Uso misto pessoal e profissional"],
-    campos_bloqueantes: [],
     deducibilidade_se_desbloqueado: null,
   }));
 
@@ -145,22 +143,32 @@ Deno.test("revisao por motivo nao respondivel nao vira pergunta", async () => {
   assertEquals(saida.json.mensagem_usuario, MENSAGEM_BASE);
 });
 
-Deno.test("campo fora da lista de respondiveis e descartado", async () => {
-  const saida = await montarPayload(expense({
-    campos_bloqueantes: ["categoria", "valor"],
-  }));
-
-  assertEquals(saida.json.followup_campo, null);
-  assertEquals(saida.json.metadados_ia.campos_bloqueantes, []);
+Deno.test("destino invalido e tratado como ausente", async () => {
+  // NAO_DEDUTIVEL e INDETERMINADO nao sao destino de promocao: promover para
+  // eles nao aprovaria nada, e perguntar seria atrito sem desfecho.
+  for (const destino of ["NAO_DEDUTIVEL", "INDETERMINADO", "", "SIM"]) {
+    const saida = await montarPayload(expense({ deducibilidade_se_desbloqueado: destino }));
+    assertEquals(saida.json.followup_campo, null, `destino ${destino}`);
+    assertEquals(saida.json.metadados_ia.campos_bloqueantes, [], `destino ${destino}`);
+  }
 });
 
-Deno.test("IA antiga sem campos_bloqueantes nao quebra o node", async () => {
-  const parsed = expense();
-  delete (parsed as Record<string, unknown>).campos_bloqueantes;
-  const saida = await montarPayload(parsed);
+Deno.test("campos_bloqueantes que a IA porventura mande e ignorado", async () => {
+  // O campo saiu do schema do prompt. Se um modelo antigo (ou o proprio Gemini
+  // por inercia do formato) ainda mandar a lista, ela nao pode influenciar: o
+  // node deriva a sua. As duas direcoes importam — lista vazia nao pode calar a
+  // pergunta, e lista com lixo nao pode inventar uma.
+  const calada = await montarPayload(expense({ campos_bloqueantes: [] }));
+  assertEquals(calada.json.followup_campo, "documento_prestador");
+  assertEquals(calada.json.metadados_ia.campos_bloqueantes, ["documento_prestador"]);
 
-  assertEquals(saida.json.followup_campo, null);
-  assertEquals(saida.json.metadados_ia.campos_bloqueantes, []);
+  const inventada = await montarPayload(expense({
+    campos_bloqueantes: ["categoria", "valor"],
+    documento_prestador: "11.222.333/0001-81",
+    estabelecimento: "Clinica Vida",
+  }));
+  assertEquals(inventada.json.followup_campo, null);
+  assertEquals(inventada.json.metadados_ia.campos_bloqueantes, []);
 });
 
 // --- consulta-e-dossie: leitura da anotacao -------------------------------

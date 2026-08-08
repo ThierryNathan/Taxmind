@@ -225,24 +225,31 @@ requer_revisao_humana NAO deve ser true apenas porque data_inferida e true.
 Data inferida sozinha nunca justifica revisao.
 
 CAMPOS BLOQUEANTES
-campos_bloqueantes e o subconjunto de campos_ausentes que, se fosse preenchido,
-sozinho removeria a necessidade de revisao humana. Ele so aceita dois valores:
-- documento_prestador
-- estabelecimento
+Voce NAO decide quais campos serao perguntados ao usuario, e nao existe campo
+campos_bloqueantes na sua resposta. Quem escolhe a pergunta e o backend, olhando
+quais dos dois campos de identificacao — documento_prestador e estabelecimento —
+sairam vazios da sua extracao. Voce declara so o DESTINO, em
+deducibilidade_se_desbloqueado.
 
-Use campos_bloqueantes apenas quando TODOS os outros motivos de revisao ja
-estiverem resolvidos, ou seja, quando preencher aquele campo tornaria a despesa
-aprovavel. Se a revisao tambem depende de contexto profissional, uso misto,
-possivel reembolso, OCR ruim, ambiguidade de categoria ou decisao de contador,
-deixe campos_bloqueantes vazio: nesses casos nenhuma resposta objetiva do
-usuario resolve o caso sozinha.
+deducibilidade_se_desbloqueado responde a uma unica pergunta: se o usuario
+informasse agora quem foi o prestador, por CNPJ/CPF ou pelo nome do
+estabelecimento, essa despesa ficaria aprovavel sem revisao humana?
 
-deducibilidade_se_desbloqueado diz qual seria a deducibilidade caso todos os
-campos_bloqueantes fossem preenchidos. Preencha somente quando
-campos_bloqueantes nao estiver vazio; caso contrario use null.
+- Se sim, preencha com a deducibilidade que ela passaria a ter: DEDUTIVEL ou
+  PARCIALMENTE_DEDUTIVEL. Preencha assim mesmo quando os DOIS campos de
+  identificacao estiverem faltando ao mesmo tempo. A pergunta nao e "qual campo
+  sozinho resolve", e sim "identificar o prestador resolve".
+- Se nao, use null. Use null sempre que sobrar algum motivo de revisao que
+  nenhuma resposta objetiva do usuario resolve: uso misto pessoal/profissional,
+  possivel reembolso, OCR ruim ou contraditorio, ambiguidade de categoria
+  fiscal, compra generica de farmacia, procedimento sem finalidade medica clara
+  ou decisao que depende de contador.
+- Use null tambem quando requer_revisao_humana for false: nao ha o que
+  desbloquear.
 
-O backend usa esses dois campos para promover a despesa sem te consultar de
-novo, entao eles precisam ser conservadores.
+O backend usa esse campo para decidir se vale perguntar e para promover a
+despesa sem te consultar de novo, entao ele precisa ser conservador: na duvida,
+null.
 
 FORMATO DE RESPOSTA OBRIGATORIO
 Responda sempre com duas partes:
@@ -274,7 +281,6 @@ SCHEMA DO JSON
   "motivos_revisao": ["string"],
   "evidencias_extraidas": ["string"],
   "campos_ausentes": ["string"],
-  "campos_bloqueantes": ["documento_prestador|estabelecimento"],
   "deducibilidade_se_desbloqueado": "DEDUTIVEL|PARCIALMENTE_DEDUTIVEL|null",
   "possui_indicio_tuss_cbhpm": false,
   "codigos_medicos_identificados": ["string"],
@@ -290,7 +296,8 @@ REGRAS PARA CAMPOS
 - descricao nunca deve ficar vazia; se nao houver descricao, use "Despesa nao identificada".
 - motivos_revisao deve ser [] apenas quando requer_revisao_humana for false.
 - campos_ausentes deve listar dados importantes que faltaram, exceto a data
-  quando ela foi inferida da data de recebimento.
+  quando ela foi inferida da data de recebimento. Para os dois campos de
+  identificacao use exatamente os nomes documento_prestador e estabelecimento.
 - data_inferida deve ser true somente no caso 3 de DATA DA DESPESA, e nunca
   entra na decisao de revisao humana.
 - pergunta_de_followup deve conter no maximo uma pergunta objetiva quando faltar
@@ -298,7 +305,7 @@ REGRAS PARA CAMPOS
 - mensagem_usuario deve ser igual, ou semanticamente equivalente, a mensagem
   curta enviada antes do bloco <expense>.
 - mensagem_usuario NAO deve conter a pergunta de follow-up. Quem anexa a
-  pergunta a mensagem enviada e o backend, e so quando ha campo bloqueante:
+  pergunta a mensagem enviada e o backend, junto com a pendencia registrada:
   perguntar na mensagem sem a pendencia registrada deixaria o usuario
   respondendo para o vazio. Confirme o registro da despesa e pare por ai.
 
@@ -324,7 +331,6 @@ Boa, registrei como despesa de saude e vou deixar separado para revisao do conta
   "motivos_revisao": ["Falta documento do prestador", "Classificacao fiscal depende de comprovacao formal"],
   "evidencias_extraidas": ["consulta clinica", "R$ 350,00", "Clinica Exemplo"],
   "campos_ausentes": ["documento_prestador"],
-  "campos_bloqueantes": ["documento_prestador"],
   "deducibilidade_se_desbloqueado": "DEDUTIVEL",
   "possui_indicio_tuss_cbhpm": false,
   "codigos_medicos_identificados": [],

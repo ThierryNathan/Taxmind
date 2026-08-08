@@ -30,6 +30,58 @@ export function campoRespondivel(campo: unknown): campo is CampoFollowup {
   return typeof campo === "string" && (CAMPOS_FOLLOWUP as readonly string[]).includes(campo);
 }
 
+/** Para onde a despesa vai se a identificacao do prestador chegar. Unico juizo
+ *  fiscal que continua sendo da IA nesta decisao; o resto e derivado aqui. */
+export function destinoSeDesbloqueado(analise: Record<string, unknown> | null | undefined): string | null {
+  const declarado = analise?.deducibilidade_se_desbloqueado;
+  return typeof declarado === "string" && ["DEDUTIVEL", "PARCIALMENTE_DEDUTIVEL"].includes(declarado)
+    ? declarado
+    : null;
+}
+
+/**
+ * Campos de identificacao que valem uma pergunta, derivados da analise.
+ *
+ * A IA JA declarou este conjunto num campo proprio (campos_bloqueantes) e o
+ * campo foi removido do schema, porque a definicao dele era irrealizavel
+ * justamente onde mais importava: "o subconjunto que, preenchido SOZINHO,
+ * removeria a revisao". Quando faltam os dois campos ao mesmo tempo — o formato
+ * de "paguei 600 no proctologista", sem lugar e sem documento — nenhum deles
+ * sozinho satisfaz a definicao, e o modelo devolvia [] corretamente. Medido
+ * contra o Gemini real: 10/10 execucoes com lista vazia, e a mesma mensagem com
+ * um so campo faltando enchia a lista 6/6. Nao era variacao do modelo, era a
+ * regra pedindo o impossivel.
+ *
+ * O que sobra para a IA e o juizo que so ela tem: identificar o prestador
+ * resolve, ou sobra motivo subjetivo (uso misto, reembolso, OCR ruim,
+ * ambiguidade de categoria, decisao de contador)? Isso e
+ * deducibilidade_se_desbloqueado, que a promocao ja precisava consultar. Com um
+ * campo so no lugar de dois, deixa de existir a possibilidade de os dois se
+ * contradizerem.
+ *
+ * A lista tem no maximo UM campo, e nao a intersecao inteira, por dois motivos:
+ * a regra fiscal de SAUDE pede "identificacao do prestador OU estabelecimento",
+ * entao um CNPJ ja satisfaz o requisito inteiro; e o follow-up so pergunta uma
+ * coisa, logo uma lista maior nunca esvaziaria e a promocao morreria esperando
+ * resposta que ninguem pediu. documento_prestador vem primeiro por ser o unico
+ * verificavel sem IA (digito verificador).
+ *
+ * Derivar do campo extraido, e nao de campos_ausentes, tira do caminho a ultima
+ * dependencia de texto livre: "esta vazio" e fato da extracao, enquanto
+ * campos_ausentes e uma lista que a IA redige.
+ */
+export function derivarCamposBloqueantes(
+  analise: Record<string, unknown> | null | undefined,
+): CampoFollowup[] {
+  if (!analise) return [];
+  if (!destinoSeDesbloqueado(analise)) return [];
+
+  const vazio = (valor: unknown) =>
+    valor === null || valor === undefined || String(valor).trim() === "";
+
+  return CAMPOS_FOLLOWUP.filter((campo) => vazio(analise[campo])).slice(0, 1);
+}
+
 const MS_POR_MINUTO = 60 * 1000;
 
 export function calcularExpiracaoFollowup(agora: Date = new Date()): Date {

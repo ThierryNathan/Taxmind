@@ -27,6 +27,8 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import {
   type CampoFollowup,
   campoRespondivel,
+  derivarCamposBloqueantes,
+  destinoSeDesbloqueado,
   extrairRespostaDeCampo,
   followupExpirado,
   formatarDocumento,
@@ -220,7 +222,9 @@ async function reclassificar(pendencia: PendenciaComDono, recibo: Recibo, texto:
     return { resolvido: false, motivo: "JA_RESOLVIDA" as const, mensagem: null };
   }
 
-  const bloqueantes = Array.isArray(analise.campos_bloqueantes) ? analise.campos_bloqueantes : [];
+  // Mesma derivacao deterministica do primeiro lancamento: a analise nova
+  // tambem nao declara campos_bloqueantes, ela declara o destino.
+  const bloqueantes = derivarCamposBloqueantes(analise);
   // Promocao exige a IA nova dizer explicitamente que nao precisa de revisao.
   // Na duvida a despesa continua onde estava: promocao nunca rebaixa nem
   // aprova no susto.
@@ -461,12 +465,7 @@ function historicoReclassificacoes(recibo: Recibo): unknown[] {
  * fallback e manter o que ja estava.
  */
 function promoverDeducibilidade(recibo: Recibo): string {
-  const declarada = (recibo.metadados_ia as { deducibilidade_se_desbloqueado?: unknown })
-    ?.deducibilidade_se_desbloqueado;
-  const permitidas = ["DEDUTIVEL", "PARCIALMENTE_DEDUTIVEL"];
-  return typeof declarada === "string" && permitidas.includes(declarada)
-    ? declarada
-    : recibo.deducibilidade;
+  return destinoSeDesbloqueado(recibo.metadados_ia) ?? recibo.deducibilidade;
 }
 
 function motivoRestante(recibo: Recibo): string {
