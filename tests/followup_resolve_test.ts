@@ -13,6 +13,12 @@
 // reclassificacao e testada contra a API real em tests/prompt_gemini_test.ts.
 
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+// Modulo puro, sem efeito colateral no import: pode entrar antes do stub de
+// fetch sem interferir no que a function captura.
+import {
+  mensagemPerguntaSegueAberta,
+  perguntaParaCampo,
+} from "../supabase/functions/_shared/followup.ts";
 
 const SUPABASE_ORIGIN = "http://supabase.test";
 const FUNCTION_ORIGIN = "http://localhost:8000";
@@ -25,6 +31,11 @@ const FOLLOWUP_ID = "33333333-3333-4333-8333-333333333333";
 
 const CNPJ = "11222333000181";
 const MINUTO = 60 * 1000;
+
+// A pergunta semeada sai da fonte canonica, e nao de um literal copiado: e a
+// mesma string que a mensagem de SEM_CONTEUDO devolve ao usuario, entao um
+// literal aqui esconderia divergencia entre a pergunta feita e a repetida.
+const PERGUNTA = perguntaParaCampo("documento_prestador", { estabelecimento: "Clinica Vida" });
 
 Deno.env.set("SUPABASE_URL", SUPABASE_ORIGIN);
 Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", SERVICE_ROLE);
@@ -163,7 +174,7 @@ function semear(opcoes: {
     usuario_id: USUARIO_ID,
     recibo_id: RECIBO_ID,
     campo_alvo: "documento_prestador",
-    pergunta: "Para confirmar se é dedutível, você tem o CNPJ ou CPF de Clinica Vida?",
+    pergunta: PERGUNTA,
     mensagens_restantes: 2,
     expira_em: new Date(Date.now() + (opcoes.expiraEmMinutos ?? 20) * MINUTO).toISOString(),
     respondida_em: null,
@@ -491,9 +502,17 @@ Deno.test('"Sim" nao fecha a pendencia, e o CNPJ seguinte ainda resolve', async 
 
   assertEquals(primeira.corpo.resolvido, false);
   assertEquals(primeira.corpo.motivo, "SEM_CONTEUDO");
-  assertEquals(primeira.corpo.mensagem, null);
   // Nao ha o que reclassificar: a guarda vem antes da chamada de IA.
   assertEquals(chamadasGemini, 0);
+
+  // A mensagem de volta e o que mudou na Fase 14. `resolvido: false` continua
+  // igual — o n8n cai no mesmo node de saida —, mas o texto deixou de ser a
+  // ajuda generica ("posso registrar despesas, mostrar seu resumo...") e passou
+  // a dizer a unica coisa que importa aqui: a pergunta continua de pe. Ela
+  // carrega a pergunta ORIGINAL, e nao um resumo dela, para nao existir uma
+  // segunda versao da pergunta para manter em dia.
+  assertEquals(primeira.corpo.mensagem, mensagemPerguntaSegueAberta(PERGUNTA));
+  assert(String(primeira.corpo.mensagem).endsWith(PERGUNTA));
 
   // A pendencia continua aberta e o recibo intacto.
   assertEquals(followup().respondida_em, null);
@@ -608,4 +627,96 @@ Deno.test("IA indisponivel nao derruba nem fecha a pendencia", async () => {
   assertEquals(corpo.resolvido, false);
   assertEquals(recibo().status, "REVISAO_HUMANA");
   assertEquals(followup().respondida_em, null);
+});
+
+// --- documento digitado errado (Fase 14, varredura) -----------------------
+
+Deno.test("CNPJ com digito trocado nao chega na IA e nao fecha a pendencia", async () => {
+  // O caso medido contra o Gemini real: `11.222.333/0001-82`, um digito fora
+  // do lugar. A extracao deterministica recusa (certo), e sem esta guarda a
+  // mensagem ia para a reclassificacao — que gravava o numero invalido em
+  // documento_prestador e promovia a despesa para DEDUTIVEL sem revisao, em
+  // 3 de 3 execucoes. O caminho de IA desfazia a validacao de digito
+  // verificador que o caminho deterministico existe para fazer.
+  semear();
+
+  // Se a IA for chamada, o mock devolve uma analise que fecharia a pendencia.
+  // De proposito: o teste tem que provar que a function nao chega ate ela.
+  respostaGemini = blocoExpense({
+    categoria: "SAUDE",
+    deducibilidade: "DEDUTIVEL",
+    documento_prestador: "11.222.333/0001-82",
+    requer_revisao_humana: false,
+    motivos_revisao: [],
+  });
+
+  const { corpo } = await resolver(comDocumento("o cnpj é 11.222.333/0001-82"));
+
+  assertEquals(corpo.resolvido, false);
+  assertEquals(corpo.motivo, "DOCUMENTO_INVALIDO");
+  assertEquals(chamadasGemini, 0);
+
+  // A pendencia continua aberta: quem trocou um digito tem o numero em maos.
+  assertEquals(followup().respondida_em, null);
+  assertEquals(followup().descartada_em, null);
+  assertEquals(recibo().documento_prestador, null);
+  assertEquals(recibo().status, "REVISAO_HUMANA");
+
+  // E a mensagem diz o que aconteceu, em vez do texto de ajuda generico.
+  const mensagem: string = corpo.mensagem;
+  assert(mensagem.includes("não fecha"), mensagem);
+
+  // Corrigido o digito, a mesma pendencia resolve normalmente.
+  const segunda = await resolver(comDocumento(`o cnpj é ${CNPJ}`));
+  assertEquals(segunda.corpo.resolvido, true);
+  assertEquals(segunda.corpo.modo, "CAMPO_PREENCHIDO");
+  assertEquals(recibo().documento_prestador, "11.222.333/0001-81");
+});
+
+Deno.test("pergunta de estabelecimento nao trata numero como documento errado", async () => {
+  // A guarda so vale quando a pergunta era pelo documento. Numero em resposta
+  // a "onde foi essa despesa?" nao e documento digitado errado.
+  semear();
+  db.followups_pendentes[0].campo_alvo = "estabelecimento";
+  db.followups_pendentes[0].pergunta = perguntaParaCampo("estabelecimento");
+  respostaGemini = null;
+
+  const { corpo } = await resolver(comDocumento("11.222.333/0001-82"));
+
+  assertEquals(corpo.motivo, "SEM_RELACAO");
+  assertEquals(chamadasGemini, 1);
+});
+
+Deno.test("documento nao conferido vindo da IA nao entra no recibo", async () => {
+  // Segunda camada: mesmo com a guarda, a analise pode devolver um documento
+  // que ninguem digitou. Gravar documento nao conferido e pior do que nao
+  // gravar nada — ele viraria evidencia no dossie do contador.
+  semear();
+  respostaGemini = blocoExpense({
+    descricao: "Consulta com psicologo",
+    estabelecimento: "Clinica Vida",
+    documento_prestador: "11.222.333/0001-82",
+    categoria: "SAUDE",
+    deducibilidade: "DEDUTIVEL",
+    requer_revisao_humana: false,
+    motivos_revisao: [],
+  });
+
+  const { corpo } = await resolver({
+    followup_id: FOLLOWUP_ID,
+    usuario_id: USUARIO_ID,
+    texto: "foi na clinica vida, consulta com psicologo",
+  });
+
+  assertEquals(corpo.resolvido, true);
+  assertEquals(corpo.modo, "RECLASSIFICADO");
+  // O estabelecimento entra; o documento invalido, nao.
+  assertEquals(recibo().estabelecimento, "Clinica Vida");
+  assertEquals(recibo().documento_prestador, null);
+  // A analise crua fica na trilha, com o documento que a IA propos — o que foi
+  // recusado foi a promocao dele a campo do recibo.
+  assertEquals(
+    recibo().metadados_ia.reclassificacoes[0].analise.documento_prestador,
+    "11.222.333/0001-82",
+  );
 });

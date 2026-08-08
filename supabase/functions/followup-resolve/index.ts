@@ -29,11 +29,15 @@ import {
   campoRespondivel,
   derivarCamposBloqueantes,
   destinoSeDesbloqueado,
+  documentoConferido,
   extrairRespostaDeCampo,
   followupExpirado,
   formatarDocumento,
+  mensagemDocumentoNaoConfere,
+  mensagemPerguntaSegueAberta,
   montarContextoReclassificacao,
   type PendenciaFollowup,
+  respostaDocumentoInvalido,
   respostaSemConteudo,
 } from "../_shared/followup.ts";
 import { TAXMIND_SYSTEM_PROMPT } from "../_shared/prompt_fiscal.ts";
@@ -133,7 +137,7 @@ async function resolver(followupId: string, usuarioId: string, texto: string) {
   const documento = extrairRespostaDeCampo(campo, texto);
   return documento
     ? await preencherCampo(pendencia, recibo, campo, documento)
-    : await reclassificar(pendencia, recibo, texto);
+    : await reclassificar(pendencia, recibo, campo, texto);
 }
 
 // --- modo CAMPO_PREENCHIDO -----------------------------------------------
@@ -209,7 +213,12 @@ async function preencherCampo(
 
 // --- modo RECLASSIFICADO --------------------------------------------------
 
-async function reclassificar(pendencia: PendenciaComDono, recibo: Recibo, texto: string) {
+async function reclassificar(
+  pendencia: PendenciaComDono,
+  recibo: Recibo,
+  campo: CampoFollowup,
+  texto: string,
+) {
   // Antes de qualquer coisa: a resposta carrega alguma informacao?
   //
   // "Sim" e a resposta natural para "voce tem o CNPJ?", e ela nao responde
@@ -223,8 +232,38 @@ async function reclassificar(pendencia: PendenciaComDono, recibo: Recibo, texto:
   // consumida. O orcamento de mensagens segue sendo debitado la na
   // whatsapp-webhook, como em qualquer mensagem que nao e resposta — entao isto
   // nao vira pendencia imortal.
+  //
+  // A mensagem de volta e a unica coisa que mudou na Fase 14: `resolvido:
+  // false` continua igual, e o n8n continua caindo no mesmo node de saida. Sem
+  // ela o usuario recebia o texto de ajuda generico ("posso registrar
+  // despesas, mostrar seu resumo...") depois de responder "sim" a uma pergunta
+  // — nada ali dizia que a pergunta seguia de pe.
   if (respostaSemConteudo(texto)) {
-    return { resolvido: false, motivo: "SEM_CONTEUDO" as const, mensagem: null };
+    return {
+      resolvido: false,
+      motivo: "SEM_CONTEUDO" as const,
+      mensagem: mensagemPerguntaSegueAberta(pendencia.pergunta),
+    };
+  }
+
+  // Documento digitado errado (Fase 14, varredura). Medido: `11.222.333/0001-82`
+  // — um digito trocado — passava reto pela reclassificacao, que gravava o
+  // numero invalido em documento_prestador e promovia a despesa para DEDUTIVEL
+  // sem revisao, 3/3 no Gemini real. O caminho deterministico valida digito
+  // verificador exatamente para isso nao acontecer; sem esta guarda, o caminho
+  // de IA desfazia a validacao.
+  //
+  // So vale quando a pergunta era pelo documento: numero em resposta a "onde
+  // foi essa despesa?" nao e documento digitado errado.
+  //
+  // Fica antes de reivindicar, como a guarda de conteudo: a pergunta continua
+  // aberta, porque quem trocou um digito quase sempre tem o numero em maos.
+  if (campo === "documento_prestador" && respostaDocumentoInvalido(texto)) {
+    return {
+      resolvido: false,
+      motivo: "DOCUMENTO_INVALIDO" as const,
+      mensagem: mensagemDocumentoNaoConfere(),
+    };
   }
 
   const analise = await pedirReclassificacao(recibo, pendencia.pergunta, texto);
@@ -257,7 +296,11 @@ async function reclassificar(pendencia: PendenciaComDono, recibo: Recibo, texto:
     justificativa_deducibilidade: analise.justificativa_deducibilidade ??
       recibo.justificativa_deducibilidade,
     estabelecimento: analise.estabelecimento ?? recibo.estabelecimento,
-    documento_prestador: analise.documento_prestador ?? recibo.documento_prestador,
+    // Segunda camada da guarda acima: mesmo com ela, a analise pode devolver um
+    // documento que ninguem digitou. Documento nao conferido nao entra — ele
+    // viraria evidencia no dossie que o contador revisa.
+    documento_prestador: documentoConferido(analise.documento_prestador) ??
+      recibo.documento_prestador,
     metadados_ia: {
       ...recibo.metadados_ia,
       campos_bloqueantes: bloqueantes,

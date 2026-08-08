@@ -14,6 +14,7 @@ import {
   cnpjValido,
   cpfValido,
   decidirFollowup,
+  documentoConferido,
   extrairDocumento,
   extrairRespostaDeCampo,
   FOLLOWUP_MENSAGENS_TOLERADAS,
@@ -22,6 +23,7 @@ import {
   formatarDocumento,
   perguntaParaCampo,
   type PendenciaFollowup,
+  respostaDocumentoInvalido,
   respostaSemConteudo,
 } from "../supabase/functions/_shared/followup.ts";
 
@@ -286,4 +288,69 @@ Deno.test("campo fora da lista de respondiveis nao vira pergunta", () => {
     { tipo: "text", texto: "saude" },
   );
   assertEquals(decisao.acao, "descartar");
+});
+
+// --- documento digitado errado (Fase 14, varredura) -----------------------
+
+Deno.test("documento com digito verificador errado e reconhecido como erro de digitacao", () => {
+  // O caso medido: um digito trocado no CNPJ da pergunta. A extracao recusa (e
+  // deve recusar), e ate a Fase 14 a mensagem seguia para a reclassificacao,
+  // onde o Gemini gravava o numero invalido e promovia a despesa — 3/3.
+  assert(respostaDocumentoInvalido("11.222.333/0001-82"));
+  assert(respostaDocumentoInvalido("o cnpj é 11.222.333/0001-82"));
+  assert(respostaDocumentoInvalido("cpf dele é 111.444.777-36"));
+  assert(respostaDocumentoInvalido("11222333000182"));
+});
+
+Deno.test("as duas leituras do documento sao mutuamente exclusivas", () => {
+  // extrairDocumento nao foi tocado; respostaDocumentoInvalido e a irma dele.
+  // Nenhum texto pode acionar as duas, e nenhuma resposta valida pode virar
+  // "digitou errado".
+  const textos = [
+    CNPJ,
+    CPF,
+    "11.222.333/0001-81",
+    "cnpj dele e 11.222.333/0001-81",
+    "11.222.333/0001-82",
+    "o cnpj é 11.222.333/0001-82",
+    "paguei 450 na clinica 11.222.333/0001-81",
+    "paguei 450 na clinica 11.222.333/0001-82",
+    "foi na clinica vida",
+    "sim",
+    "11.222.333/0001-81 ou 25.255.628/0001-69",
+    "meu telefone é 11999998888",
+    "gastei 82 reais",
+  ];
+
+  for (const texto of textos) {
+    const valido = extrairDocumento(texto) !== null;
+    const invalido = respostaDocumentoInvalido(texto);
+    assert(!(valido && invalido), `os dois responderam sim: ${texto}`);
+  }
+});
+
+Deno.test("numero solto com vocabulario de gasto continua sendo despesa nova", () => {
+  // Mesmo vies do irmao: numero sobrando ou termo de gasto significa
+  // lancamento, e nao documento digitado errado. Errar para este lado custa uma
+  // pergunta repetida; errar para o outro rouba um lancamento.
+  assert(!respostaDocumentoInvalido("paguei 450 na clinica 11.222.333/0001-82"));
+  assert(!respostaDocumentoInvalido("gastei 11222333000182 reais"));
+  assert(!respostaDocumentoInvalido("R$ 11222333000182"));
+  assert(!respostaDocumentoInvalido("11.222.333/0001-82 e 80 de uber"));
+  // Sem documento nenhum tambem nao e erro de digitacao.
+  assert(!respostaDocumentoInvalido("foi na clinica vida"));
+  assert(!respostaDocumentoInvalido("sim"));
+  assert(!respostaDocumentoInvalido(""));
+  assert(!respostaDocumentoInvalido(null));
+});
+
+Deno.test("documentoConferido so deixa passar o que fecha o digito verificador", () => {
+  assertEquals(documentoConferido("11.222.333/0001-81"), "11.222.333/0001-81");
+  assertEquals(documentoConferido(CNPJ), CNPJ);
+  assertEquals(documentoConferido(CPF), CPF);
+  assertEquals(documentoConferido("11.222.333/0001-82"), null);
+  assertEquals(documentoConferido("nao informado"), null);
+  assertEquals(documentoConferido(null), null);
+  assertEquals(documentoConferido(""), null);
+  assertEquals(documentoConferido(12345), null);
 });

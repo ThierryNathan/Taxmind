@@ -121,6 +121,48 @@ export function perguntaParaCampo(
 }
 
 /**
+ * Aviso de que a pergunta anterior morreu para dar lugar a esta.
+ *
+ * Uma pendencia aberta por usuario (unique parcial da migration 009): despesa
+ * nova que tambem precisa de follow-up encerra a anterior com SUPERSEDIDA,
+ * dentro da mesma transacao da registrar_followup_pendente. Ate a Fase 14 isso
+ * acontecia em silencio — a despesa mais antiga perdia a chance de resolucao
+ * por conversa sem nenhum sinal de que tinha perdido.
+ *
+ * O texto NAO convida a responder a antiga depois, e a ausencia desse convite e
+ * o ponto: a pendencia antiga esta fechada e a unica aberta e a da despesa
+ * nova, entao um CNPJ enviado mais tarde seria gravado no recibo NOVO. Prometer
+ * o canal seria pior do que o silencio que estamos corrigindo — colaria
+ * evidencia no recibo errado. Fila de multiplas pendencias e outra fase.
+ *
+ * Copia viva no Code node "Montar Payload do Recibo" (o n8n nao importa arquivo
+ * do repo); tests/n8n_fase14_test.ts compara as duas.
+ */
+export const AVISO_PENDENCIA_SUBSTITUIDA =
+  "A pergunta da despesa anterior ficou sem resposta — ela continua registrada e vai para a revisão do contador.";
+
+/**
+ * Resposta a uma mensagem que nao carregava informacao nenhuma ("sim", "ok").
+ *
+ * Antes da Fase 14 este caminho caia no texto de ajuda generico do
+ * consulta-e-dossie ("posso registrar despesas, mostrar seu resumo..."), que
+ * nao diz a unica coisa que importa ali: a pergunta continua de pe e ainda pode
+ * ser respondida. A pendencia nao foi consumida — respostaSemConteudo roda
+ * antes de reivindicar —, entao a mensagem seguinte com o dado ainda resolve.
+ *
+ * A frase repete a pergunta original em vez de resumi-la: o dado que falta ja
+ * esta escrito ali, e reescrever de memoria criaria uma segunda versao da
+ * pergunta para manter em dia.
+ */
+export function mensagemPerguntaSegueAberta(pergunta: string): string {
+  return [
+    "Sem problema — a despesa já está registrada, isso não trava nada.",
+    "Se você tiver esse dado por aí, é só me mandar aqui na sequência:",
+    pergunta,
+  ].join("\n\n");
+}
+
+/**
  * A mensagem responde a pergunta pendente?
  *
  * So `documento_prestador` tem resposta reconhecivel sem IA: CNPJ e CPF tem
@@ -252,6 +294,101 @@ export function extrairDocumento(texto: string | null | undefined): string | nul
   if (outras.some((palavra) => TERMOS_DE_LANCAMENTO.includes(palavra))) return null;
 
   return candidatos[0];
+}
+
+/**
+ * A mensagem parece um documento, mas o digito verificador nao fecha?
+ *
+ * Existe por um caso medido na varredura da Fase 14: respondido
+ * `11.222.333/0001-82` (um digito trocado no CNPJ da pergunta), a extracao
+ * deterministica recusa — como deve —, e a mensagem seguia para a
+ * reclassificacao por IA. O Gemini entao gravava o numero invalido em
+ * documento_prestador e promovia a despesa para DEDUTIVEL com
+ * requer_revisao_humana false, em 3 de 3 execucoes. Ou seja: o caminho de IA
+ * apagava exatamente a validacao que o caminho deterministico existe para
+ * fazer, e o recibo terminava aprovado com um documento que nao existe.
+ *
+ * Esta funcao NAO altera extrairDocumento — ela e a irma dele, e as duas sao
+ * mutuamente exclusivas por construcao (a primeira coisa aqui e perguntar se
+ * aquela aceitou). A varredura de grupos de digitos e repetida de proposito em
+ * vez de extraida para um helper comum: extrairDocumento e codigo validado
+ * contra conversa real e nao vai ser reescrito para caber num refactor.
+ * tests/followup_test.ts prova que as duas nunca respondem sim ao mesmo texto.
+ *
+ * Os filtros de recusa sao os mesmos do irmao, pelo mesmo motivo: numero
+ * sobrando e vocabulario de gasto indicam lancamento novo, nao documento
+ * digitado errado.
+ */
+export function respostaDocumentoInvalido(texto: string | null | undefined): boolean {
+  if (!texto) return false;
+  // Documento valido tem caminho proprio; aqui so entra o que aquela recusou.
+  if (extrairDocumento(texto)) return false;
+
+  const semAcento = texto
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .trim();
+  if (!semAcento) return false;
+  if (/r\$/.test(semAcento)) return false;
+
+  const semPontuacao = semAcento.replace(/[.\-/\\:,;()]/g, " ").replace(/\s+/g, " ").trim();
+  const palavras = semPontuacao.split(" ").filter(Boolean);
+
+  const grupos: string[] = [];
+  const outras: string[] = [];
+  let corrente = "";
+  const fecharGrupo = () => {
+    if (!corrente) return;
+    grupos.push(corrente);
+    corrente = "";
+  };
+
+  for (const palavra of palavras) {
+    if (/^\d+$/.test(palavra)) {
+      corrente += palavra;
+      continue;
+    }
+    fecharGrupo();
+    outras.push(palavra);
+  }
+  fecharGrupo();
+
+  // Um grupo so, do tamanho de um documento, e nenhum termo de gasto em volta.
+  // Dois numeros ja e "valor + alguma coisa", e ai o vies volta a ser o de
+  // sempre: na duvida, isto e mensagem nova.
+  if (grupos.length !== 1) return false;
+  if (outras.some((palavra) => TERMOS_DE_LANCAMENTO.includes(palavra))) return false;
+
+  const numero = grupos[0];
+  if (numero.length === 14) return !cnpjValido(numero);
+  if (numero.length === 11) return !cpfValido(numero);
+  return false;
+}
+
+/**
+ * Documento vindo da IA, so quando o digito verificador fecha.
+ *
+ * Segunda camada da mesma correcao: mesmo com a guarda acima, a analise pode
+ * devolver um documento que ninguem digitou (alucinacao, OCR do texto). Gravar
+ * documento nao conferido e pior do que nao gravar nada, porque ele vira
+ * evidencia no dossie que o contador vai revisar.
+ */
+export function documentoConferido(valor: unknown): string | null {
+  if (typeof valor !== "string" || !valor.trim()) return null;
+  const numero = valor.replace(/\D/g, "");
+  if (numero.length === 14 && cnpjValido(numero)) return valor;
+  if (numero.length === 11 && cpfValido(numero)) return valor;
+  return null;
+}
+
+/** Resposta a um documento digitado errado. A pendencia continua aberta: quem
+ *  errou um digito quase sempre tem o numero certo em maos. */
+export function mensagemDocumentoNaoConfere(): string {
+  return [
+    "Esse número não fecha como CNPJ nem como CPF — deve ter escapado algum dígito.",
+    "Confere aí e me manda de novo que eu anoto na despesa.",
+  ].join("\n\n");
 }
 
 /**
