@@ -59,6 +59,30 @@ Armadilhas ja encontradas na pratica. Ler antes de mexer nas areas citadas.
 - Merge em modo `append` **dispara mesmo quando um dos ramos de entrada nunca executou** (verificado no 1.99.1). Isso deixa usar `IF -> dois ramos -> Merge` sem sentinela, e o caso importa de verdade: no sandbox do Pluggy 100% das transacoes caem no pre-filtro e o ramo da IA fica vazio.
 - `import:workflow` respeita o campo `active` do JSON: importar um arquivo com `active: false` **desativa** o webhook que estava ativo. E `update:workflow --active=true` so vale depois de reiniciar o n8n.
 - Terceiro webhook da casa: `N8N_OPENFINANCE_WEBHOOK_URL` (transacao bancaria -> `openfinance-transacoes`), sem relacao com os outros dois.
+- Os exports sao byte a byte `JSON.stringify(obj, null, 2)` **sem newline final** (conferido nos tres arquivos). Isso permite edicao programatica cirurgica — ler, trocar so o campo alvo, reserializar — com diff minimo e sem perder id, `webhookId`, `position`, `connections` nem `active`. Continua valendo: nao regenerar o workflow, e conferir o diff.
+- O prompt fiscal tem **tres** copias vivas: `backend/prompts/taxmind_system_prompt.js` (fonte de edicao), `supabase/functions/_shared/prompt_fiscal.ts` (o bundle da Edge Function nao atravessa a fronteira de `supabase/functions/`) e o literal embutido no node "Preparar Contexto" (o n8n nao importa arquivo do repositorio). `tests/n8n_fase12_test.ts` compara as tres e falha se alguem editar so uma.
+- Code node de teste roda fora do n8n com um arremedo de `$input` / `$("Node")` (`new AsyncFunction("$input", "$", jsCode)`), lendo o jsCode do proprio export. Ver `tests/n8n_fase12_test.ts` — testa o artefato que vai ser importado, nao uma copia.
+
+### Data da despesa
+
+- Mensagem sem nenhuma referencia temporal **nao gera pergunta de volta**: a maioria das mensagens nao cita data mesmo sendo do dia, e perguntar criaria atrito em quase todo lancamento. A data cai no recebimento e fica marcada em `metadados_ia.data_inferida`.
+- `data_inferida` e rastro de auditoria, nao pendencia: nao entra em `campos_ausentes`, nao vira motivo de revisao e **nao pode** ser lida pela decisao de status. A decisao continua sendo so `parsed.requer_revisao_humana`.
+- A data de referencia e o dia em **America/Sao_Paulo**, nao em UTC: mensagem das 22h de Sao Paulo ja e o dia seguinte em UTC, e a despesa e de hoje para quem mandou.
+- Deducao reduz a BASE DE CALCULO do IRPF, nao o imposto devido. Confirmacao no WhatsApp, resumo e cabecalho do dossie nunca apresentam o valor dedutivel como dinheiro que volta.
+
+### Follow-up conversacional
+
+Passo a passo em `docs/06 - Follow-up Conversacional.md`.
+
+- A despesa e gravada e confirmada **antes** de a pergunta existir. Todo caminho novo desta fase e opcional: `onError: continueRegularOutput` nos nodes de follow-up e fail open em toda consulta da `whatsapp-webhook`. Se algum dia um deles virar bloqueante, a fase perdeu o proposito.
+- Pergunta so quando a IA declara `campos_bloqueantes` — o campo que **sozinho** destravaria a aprovacao. Uso misto, reembolso, OCR ruim e ambiguidade de categoria devolvem lista vazia: nenhuma resposta objetiva resolve.
+- `deducibilidade_se_desbloqueado` e o que torna a promocao deterministica. Sem ela a promocao adivinharia dedutibilidade fiscal; o fallback e manter o que estava.
+- So `documento_prestador` tem resposta reconhecivel sem IA (CNPJ/CPF tem digito verificador). `estabelecimento` e texto livre e cai na reclassificacao de proposito: adivinhar nome de lugar roubaria lancamento ("mercado 50 reais" e nome ou despesa?).
+- Resposta reconhecida **nao** consome orcamento de mensagens: senao a propria resposta poderia fechar a pendencia que ela veio responder.
+- `valor` e `data_despesa` nunca sao reescritos por follow-up, nos dois modos. A analise original fica inteira em `metadados_ia`; a nova entra em `followups`/`reclassificacoes`, ao lado.
+- A `whatsapp-webhook` e o unico componente que ve toda mensagem (texto vai para `consulta-e-dossie`, midia para `receipt-ocr-classification`), entao o orcamento e contado la, e nao no n8n.
+- Teste de concorrencia com mock sincrono **passa sem testar nada**: a segunda execucao ja encontra a linha reivindicada no SELECT e nem chega ao UPDATE. Para exercitar a exclusao mutua de verdade, segurar o PATCH da primeira ate a segunda ter lido — ver a barreira em `tests/followup_resolve_test.ts`.
+- Fixture de reclassificacao precisa de `valor`/`data` **diferentes** dos gravados. Com os mesmos valores, um `valor: analise.valor ?? recibo.valor` passa despercebido pelo teste.
 
 ### Gemini
 
@@ -72,7 +96,7 @@ Armadilhas ja encontradas na pratica. Ler antes de mexer nas areas citadas.
 - `.env.example` e separado por fronteira de seguranca: raiz = backend, com segredos; `apps/onboarding/.env.example` = so variaveis `VITE_*` publicas, que vao no bundle. O `.gitignore` fica centralizado na raiz e ja cobre subpastas.
 - O projeto tem `ALTER DEFAULT PRIVILEGES ... GRANT ALL ON TABLES TO anon, authenticated, service_role` no schema `public`: **tabela nova nasce com privilegio total para o anon key**. RLS habilitada sem policy ja nega tudo, mas quem cria tabela que guarda credencial (hash de codigo, token) deve tambem `revoke all ... from anon, authenticated` — senao um `disable row level security` acidental no futuro expoe a tabela inteira. Mesmo raciocinio para log append-only: sem revoke, `authenticated` tem INSERT/UPDATE/DELETE no proprio registro de auditoria.
 - `SET LOCAL role` fora de bloco de transacao e ignorado com apenas um WARNING, e o psql segue como superusuario. Teste de RLS que use `set local` sem `begin/rollback` passa achando que testou isolamento quando na verdade nao testou nada.
-- Migration validada de graca em `postgres:15` puro com um shim de ~10 linhas (roles `anon`/`authenticated`/`service_role`, schema `auth`, `auth.users`, `auth.uid()`, e o `alter default privileges` acima). Mais rapido que `supabase start` e suficiente para constraint, trigger, RLS e idempotencia.
+- Migration validada de graca em `postgres:15` puro com um shim de ~10 linhas (roles `anon`/`authenticated`/`service_role`, schema `auth`, `auth.users`, `auth.uid()`, e o `alter default privileges` acima). Mais rapido que `supabase start` e suficiente para constraint, trigger, RLS e idempotencia. O shim e o runner viraram arquivo: `tests/sql/shim_supabase.sql` e `bash tests/sql/run_migrations_docker.sh` (aplica 001..N e roda todo `tests/sql/*_test.sql`).
 
 ### Resend / Re-verificacao por e-mail
 
@@ -86,6 +110,19 @@ Armadilhas ja encontradas na pratica. Ler antes de mexer nas areas citadas.
 ### PDF
 
 - As `StandardFonts` do pdf-lib usam WinAnsi: acento latino passa, mas emoji e simbolos fora de Latin-1 lancam excecao e derrubam a geracao inteira. Como `descricao` vem de OCR, sanear o texto antes de cada `drawText`.
+- O cabecalho nao tem quebra automatica de linha: texto novo entra como array de linhas ja quebradas, com o teste medindo `widthOfTextAtSize` contra a largura util (515pt).
+- Procurar a frase desenhada nos bytes do PDF **nao acha nada**, por dois motivos somados: o `save()` comprime os streams e o `drawText` emite string hexadecimal (`<5461...> Tj`), nao texto literal. Nos dois casos o "nao achei" parece bug do cabecalho. Ver o extrator em `tests/dossie_nota_deducao_test.ts`.
+- `DecompressionStream("deflate")` recusa os bytes de sobra que o PDF deixa depois do fim do fluxo zlib (`failed to write whole buffer`); `inflateSync` de `node:zlib` ignora, como os leitores de PDF.
+
+### Consentimento LGPD
+
+- O texto vive em duas copias — `supabase/functions/_shared/consentimento.ts` (canonica) e `apps/onboarding/src/lib/consentimento.js` (espelho da tela) — porque o bundle da Edge Function so enxerga `supabase/functions/` e o Vite so enxerga `apps/onboarding/`. `tests/consentimento_espelho_test.ts` compara o texto canonico dos dois e falha se so um lado mudar. Detalhes em `docs/05 - Consentimento LGPD no Onboarding.md`.
+- O checkbox e a interface do gate, nao o gate: a `bootstrap-identity` recusa `consentimento_aceito !== true` e versao desconhecida, **depois** da checagem do token — se essa ordem inverter, o `probeBootstrapToken` do frontend para de distinguir 401 de 400 e a tela passa a dizer "link expirado" para todo mundo.
+- O `texto_hash` e calculado no servidor. Hash recebido do navegador provaria so o que o navegador quis afirmar.
+
+### Frontend do onboarding
+
+- `apps/onboarding/src/index.css` tem um reset `* { margin: 0; padding: 0 }` **fora de `@layer`**, e CSS sem camada vence `@layer utilities` do Tailwind v4: todo `py-2.5` computa `padding-block: 0` e os botoes saem achatados (~24px em vez de ~42px). Vale para as telas antigas tambem — nao e regressao de tela nova.
 
 ### Pluggy / Open Finance
 
@@ -116,6 +153,7 @@ Armadilhas ja encontradas na pratica. Ler antes de mexer nas areas citadas.
 
 ### Windows / Git Bash
 
+- `MSYS_NO_PATHCONV=1` resolve o destino dentro do container e quebra a origem no host: `docker cp /c/Users/... container:/destino` vira `CreateFile C:\c: file not found`, porque o docker e binario Windows e o caminho MSYS chega cru. Origem no host passa por `cygpath -w`, destino no container fica POSIX. Ver `tests/sql/run_migrations_docker.sh`.
 - Argumento com barra inicial e reescrito pelo MSYS para `C:/Program Files/Git/...` em **qualquer** subcomando do docker, nao so no `docker run`: `docker exec ... psql -f /arquivo.sql` vira `psql: error: C:/Program Files/Git/arquivo.sql: No such file or directory`, e `docker cp origem container:/destino` erra o destino. A mensagem sempre parece problema do arquivo, nunca do path. Fazer `export MSYS_NO_PATHCONV=1` uma vez no inicio do script, em vez de prefixar comando a comando e esquecer um.
 
 ## Regras De Seguranca

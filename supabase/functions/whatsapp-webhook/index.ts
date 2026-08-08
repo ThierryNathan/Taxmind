@@ -27,6 +27,15 @@ import {
   MAX_TENTATIVAS,
   precisaReverificar,
 } from "../_shared/verificacao.ts";
+// Fase 13: o ciclo de vida da pendencia de follow-up (expiracao por tempo,
+// orcamento de mensagens, deteccao de resposta) mora em _shared por
+// testabilidade. Esta function e o unico componente que ve TODA mensagem que
+// entra — texto e midia vao para workflows diferentes —, entao e aqui que o
+// orcamento e contado.
+import {
+  decidirFollowup,
+  type PendenciaFollowup,
+} from "../_shared/followup.ts";
 
 type WhatsAppMedia = {
   id?: string;
@@ -158,12 +167,18 @@ serve(async (request) => {
         }
       }
 
+      // Anotacao, nunca portao: o follow-up e opcional e jamais interrompe o
+      // fluxo. O maximo que acontece aqui e a mensagem seguir com um campo a
+      // mais, que o n8n usa ou ignora.
+      const followup = await anotarFollowupPendente(event, usuario);
+
       await forwardToN8n(
         {
           source: "whatsapp-cloud-api",
           event_type: "inbound_message",
           session_id: sessionId,
           normalized: event.normalized,
+          followup,
           raw_value: event.value,
         },
         resolveN8nWebhookUrl(event.normalized.message_type),
@@ -648,6 +663,95 @@ async function iniciarReverificacao(
   ].join("\n\n"));
 
   return "bloqueado";
+}
+
+// --- Fase 13: follow-up conversacional -----------------------------------
+//
+// Anotacao passada ao n8n. `valor_detectado` preenchido significa "esta
+// mensagem E a resposta" (documento com digito verificador conferido); null
+// significa "ha pendencia aberta, mas esta mensagem nao parece resposta" — o
+// classificador de intencao la no n8n decide se e evidencia nova em texto livre
+// ou assunto novo.
+type AnotacaoFollowup = {
+  id: string;
+  recibo_id: string;
+  campo_alvo: string;
+  valor_detectado: string | null;
+};
+
+/**
+ * Avanca o ciclo de vida da pendencia diante desta mensagem.
+ *
+ * Fail open em toda falha de infraestrutura, pelo mesmo motivo do portao de
+ * verificacao: o pior caso de nao anotar e uma pergunta que expira sem
+ * resposta; o pior caso de estourar aqui seria a mensagem nao chegar ao n8n, e
+ * o usuario perder o recibo por causa de um recurso opcional.
+ */
+async function anotarFollowupPendente(
+  event: InboundEvent,
+  usuario: UsuarioLookup,
+): Promise<AnotacaoFollowup | null> {
+  if (usuario.status !== "found") return null;
+
+  const { data, error } = await supabase
+    .from("followups_pendentes")
+    .select("id, recibo_id, campo_alvo, expira_em, mensagens_restantes")
+    .eq("usuario_id", usuario.usuarioId)
+    .is("respondida_em", null)
+    .is("descartada_em", null)
+    .order("criado_em", { ascending: false })
+    .limit(1);
+
+  if (error) {
+    console.error("failed to lookup followup pendente", error);
+    return null;
+  }
+
+  const pendencia = (data?.[0] as PendenciaFollowup | undefined) ?? null;
+  const decisao = decidirFollowup(pendencia, {
+    tipo: event.normalized.message_type,
+    texto: event.normalized.text_body,
+  });
+
+  if (decisao.acao === "ignorar") return null;
+
+  if (decisao.acao === "descartar") {
+    await descartarFollowup(pendencia!.id, decisao.motivo);
+    return null;
+  }
+
+  if (decisao.mensagensRestantes !== pendencia!.mensagens_restantes) {
+    await consumirOrcamentoFollowup(pendencia!.id, decisao.mensagensRestantes);
+  }
+
+  return {
+    id: pendencia!.id,
+    recibo_id: pendencia!.recibo_id,
+    campo_alvo: pendencia!.campo_alvo,
+    valor_detectado: decisao.valorDetectado,
+  };
+}
+
+async function descartarFollowup(followupId: string, motivo: string) {
+  const { error } = await supabase
+    .from("followups_pendentes")
+    .update({ descartada_em: new Date().toISOString(), descartada_motivo: motivo })
+    .eq("id", followupId)
+    .is("respondida_em", null)
+    .is("descartada_em", null);
+
+  if (error) console.error("failed to discard followup", error);
+}
+
+async function consumirOrcamentoFollowup(followupId: string, restantes: number) {
+  const { error } = await supabase
+    .from("followups_pendentes")
+    .update({ mensagens_restantes: restantes })
+    .eq("id", followupId)
+    .is("respondida_em", null)
+    .is("descartada_em", null);
+
+  if (error) console.error("failed to consume followup budget", error);
 }
 
 async function marcarSessaoVerificada(sessionId: string | null) {

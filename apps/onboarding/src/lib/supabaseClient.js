@@ -78,16 +78,31 @@ export async function linkPluggyItem({ token, itemId }) {
   return data
 }
 
-export async function submitOnboardingProfile({ token, nome, email, cpf }) {
+export async function submitOnboardingProfile({ token, nome, email, cpf, consentimentoVersao }) {
   const { data, error } = await supabase.functions.invoke('bootstrap-identity', {
-    body: { token, nome, email, cpf },
+    body: {
+      token,
+      nome,
+      email,
+      cpf,
+      // O consentimento e validado de novo no servidor: o checkbox e a
+      // interface do gate, nao o gate.
+      consentimento_aceito: true,
+      consentimento_versao: consentimentoVersao,
+    },
   })
 
   if (error) {
     const status = error.context?.status
+    const codigo = await lerCodigoDeErro(error)
+
+    // Versao recusada = este bundle esta velho em relacao ao texto publicado.
+    // Recarregar e a unica saida, e insistir no botao nao resolveria.
     const message = status === 401
       ? 'Seu link expirou. Volte ao WhatsApp e envie "Oi" novamente para gerar um novo link.'
-      : 'Não foi possível concluir seu cadastro agora. Tente novamente.'
+      : codigo === 'consentimento_versao_invalida'
+        ? 'O texto de consentimento foi atualizado. Recarregue esta página para ler a versão atual.'
+        : 'Não foi possível concluir seu cadastro agora. Tente novamente.'
     throw new Error(message)
   }
 
@@ -96,4 +111,16 @@ export async function submitOnboardingProfile({ token, nome, email, cpf }) {
   }
 
   return data
+}
+
+// O supabase-js entrega a Response crua em error.context e nao consome o corpo,
+// entao da para distinguir os 400 da Edge Function. Envolvido em try/catch
+// porque um corpo vazio ou nao-JSON aqui nao pode virar erro de tela.
+async function lerCodigoDeErro(error) {
+  try {
+    const corpo = await error.context?.clone?.().json?.()
+    return corpo?.error ?? null
+  } catch {
+    return null
+  }
 }

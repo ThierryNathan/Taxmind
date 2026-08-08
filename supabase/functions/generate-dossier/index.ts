@@ -35,6 +35,16 @@ const PAGE_HEIGHT = 842;
 const MARGIN = 40;
 const BOTTOM_LIMIT = 60;
 
+// Deducao reduz a BASE DE CALCULO do IRPF, nao o imposto devido. Sem esta nota
+// o dossie e lido como "valor que volta para o bolso", que e o erro que o
+// texto de confirmacao no WhatsApp e o resumo tambem passaram a evitar.
+// Quebrado em linhas fixas de proposito: o cabecalho nao tem quebra automatica,
+// e tests/dossie_nota_deducao_test.ts prova que cada linha cabe na largura util.
+export const NOTA_DEDUCAO = [
+  "Valores dedutiveis reduzem a base de calculo do IR — a economia real depende da sua",
+  "faixa de tributacao. Nao e o valor que voce recebe de volta.",
+];
+
 const COLUMNS = [
   { key: "data", label: "Data", width: 55 },
   { key: "descricao", label: "Descricao", width: 145 },
@@ -269,7 +279,19 @@ function drawHeader(page: PDFPage, bold: PDFFont, font: PDFFont, nome: string) {
     color: rgb(0.35, 0.35, 0.35),
   });
 
-  return y - 22;
+  y -= 16;
+  for (const linha of NOTA_DEDUCAO) {
+    page.drawText(sanitize(linha), {
+      x: MARGIN,
+      y,
+      size: 8,
+      font,
+      color: rgb(0.35, 0.35, 0.35),
+    });
+    y -= 11;
+  }
+
+  return y - 14;
 }
 
 function drawTableHeader(page: PDFPage, bold: PDFFont, y: number) {

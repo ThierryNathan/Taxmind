@@ -20,7 +20,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const body = $input.item.json.body;\nconst normalized = body.normalized || {};\nconst texto = normalized.text_body || \"\";\n\n// Casa palavra-chave sem depender de acento nem de caixa.\nconst alvo = texto\n  .normalize(\"NFD\")\n  .replace(/[\\u0300-\\u036f]/g, \"\")\n  .toLowerCase();\n\nconst contem = (termos) => termos.some((t) => alvo.includes(t));\n\n// Precedencia: o dossie e checado antes do resumo de proposito. \"resumo\" e\n// palavra comum e apareceria em \"manda o resumo em pdf\", onde a intencao real\n// e o arquivo. Os termos de dossie sao mais especificos, entao ganham.\n//\n// Conectar banco vem antes de todos, mas exigindo DOIS eixos na mesma\n// mensagem: um verbo de conexao e um substantivo de conta/banco. Casar so\n// \"conta\" ou so \"banco\" roubaria \"me manda o resumo da minha conta\" e\n// \"quanto rende o CDB do meu banco\". O prefixo \"conect\"/\"vincul\" cobre as\n// conjugacoes (conecta, conectar, vincule) sem depender de adjacencia.\n// A guarda de \"desconect\"/\"desvincul\" existe porque \"conect\" casa dentro de\n// \"desconectar\": desconexao nao esta implementada e cai na IA.\nlet intent = null;\nif (contem([\"desconect\", \"desvincul\"])) {\n  intent = null;\n} else if (\n  contem([\"conect\", \"vincul\", \"sincroniz\", \"open finance\"]) &&\n  contem([\"banco\", \"conta\", \"bancari\", \"cartao\", \"open finance\"])\n) {\n  intent = \"conectar_banco\";\n} else if (contem([\"dossie\", \"relatorio\", \"pdf\", \"exportar\"])) {\n  intent = \"exportar_dossie\";\n} else if (contem([\"resumo\", \"extrato\", \"quanto tenho\"])) {\n  intent = \"consulta_resumo\";\n}\n\nreturn {\n  json: {\n    session_id: body.session_id || null,\n    message_type: normalized.message_type || null,\n    text_body: normalized.text_body || null,\n    wa_id: normalized.wa_id,\n    phone: normalized.phone,\n    profile_name: normalized.profile_name || null,\n    intent,\n  },\n};"
+        "jsCode": "const body = $input.item.json.body;\nconst normalized = body.normalized || {};\nconst texto = normalized.text_body || \"\";\n\n// Anotacao de follow-up posta pela whatsapp-webhook (fase 13).\n// valor_detectado preenchido = esta mensagem E a resposta (documento com\n// digito verificador conferido). Preenchido so o id = ha pendencia aberta, mas\n// a mensagem nao parece resposta; quem decide se e evidencia nova em texto\n// livre e o classificador de intencao mais adiante.\nconst followup = body.followup || null;\n\n// Casa palavra-chave sem depender de acento nem de caixa.\nconst alvo = texto\n  .normalize(\"NFD\")\n  .replace(/[\\u0300-\\u036f]/g, \"\")\n  .toLowerCase();\n\nconst contem = (termos) => termos.some((t) => alvo.includes(t));\n\n// Precedencia: o dossie e checado antes do resumo de proposito. \"resumo\" e\n// palavra comum e apareceria em \"manda o resumo em pdf\", onde a intencao real\n// e o arquivo. Os termos de dossie sao mais especificos, entao ganham.\n//\n// Conectar banco vem antes de todos, mas exigindo DOIS eixos na mesma\n// mensagem: um verbo de conexao e um substantivo de conta/banco. Casar so\n// \"conta\" ou so \"banco\" roubaria \"me manda o resumo da minha conta\" e\n// \"quanto rende o CDB do meu banco\". O prefixo \"conect\"/\"vincul\" cobre as\n// conjugacoes (conecta, conectar, vincule) sem depender de adjacencia.\n// A guarda de \"desconect\"/\"desvincul\" existe porque \"conect\" casa dentro de\n// \"desconectar\": desconexao nao esta implementada e cai na IA.\nlet intent = null;\nif (contem([\"desconect\", \"desvincul\"])) {\n  intent = null;\n} else if (\n  contem([\"conect\", \"vincul\", \"sincroniz\", \"open finance\"]) &&\n  contem([\"banco\", \"conta\", \"bancari\", \"cartao\", \"open finance\"])\n) {\n  intent = \"conectar_banco\";\n} else if (contem([\"dossie\", \"relatorio\", \"pdf\", \"exportar\"])) {\n  intent = \"exportar_dossie\";\n} else if (contem([\"resumo\", \"extrato\", \"quanto tenho\"])) {\n  intent = \"consulta_resumo\";\n}\n\nreturn {\n  json: {\n    session_id: body.session_id || null,\n    message_type: normalized.message_type || null,\n    text_body: normalized.text_body || null,\n    wa_id: normalized.wa_id,\n    phone: normalized.phone,\n    profile_name: normalized.profile_name || null,\n    intent,\n    followup_id: followup ? followup.id : null,\n    followup_campo: followup ? followup.campo_alvo : null,\n    followup_valor_detectado: followup ? followup.valor_detectado : null,\n  },\n};"
       },
       "id": "4dab695c-0642-40c3-a3b8-745cfa43fdc8",
       "name": "Preparar Contexto",
@@ -404,7 +404,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const ctx = $('Montar Contexto').first().json;\nconst linhas = $input.all().map((i) => i.json);\n\nconst emojiPorCategoria = {\n  SAUDE: \"\\u{1F3E5}\",\n  EDUCACAO: \"\\u{1F393}\",\n  ALIMENTACAO: \"\\u{1F37D}\\u{FE0F}\",\n  TRANSPORTE: \"\\u{1F697}\",\n  MORADIA: \"\\u{1F3E0}\",\n  ESCRITORIO: \"\\u{1F5C2}\\u{FE0F}\",\n  EQUIPAMENTOS: \"\\u{1F5A5}\\u{FE0F}\",\n  SOFTWARE: \"\\u{1F4BE}\",\n  INTERNET_TELEFONIA: \"\\u{1F4F6}\",\n  SERVICOS_PROFISSIONAIS: \"\\u{1F4BC}\",\n  IMPOSTOS_TAXAS: \"\\u{1F9FE}\",\n  OUTROS: \"\\u{1F4CC}\",\n};\n\nconst brl = (v) =>\n  Number(v || 0).toLocaleString(\"pt-BR\", { style: \"currency\", currency: \"BRL\" });\n\nconst validas = linhas.filter((l) => l && l.categoria);\n\nif (validas.length === 0) {\n  return {\n    json: {\n      ...ctx,\n      mensagem:\n        \"Voce ainda nao tem despesas registradas. Manda a foto de um cupom ou descreve a despesa por texto que eu registro pra voce.\",\n    },\n  };\n}\n\nlet totalGeral = 0;\nlet totalDedutivel = 0;\nlet totalPendente = 0;\n\nconst blocos = validas.map((l) => {\n  totalGeral += Number(l.total || 0);\n  totalDedutivel += Number(l.total_dedutivel || 0);\n  totalPendente += Number(l.pendente_revisao || 0);\n\n  const emoji = emojiPorCategoria[l.categoria] || emojiPorCategoria.OUTROS;\n  const nome =\n    l.categoria.charAt(0) + l.categoria.slice(1).toLowerCase().split(\"_\").join(\" \");\n  return emoji + \" \" + nome + \": \" + brl(l.total) + \" (\" + l.quantidade + \")\";\n});\n\nconst partes = [\n  \"*Seu resumo fiscal*\",\n  blocos.join(\"\\n\"),\n  \"*Total:* \" + brl(totalGeral),\n  \"*Dedutivel:* \" + brl(totalDedutivel),\n];\n\nif (totalPendente > 0) {\n  partes.push(\n    \"\\u{23F3} \" +\n      totalPendente +\n      (totalPendente === 1 ? \" lancamento aguarda\" : \" lancamentos aguardam\") +\n      \" revisao humana.\"\n  );\n}\n\npartes.push(\"Quer o PDF completo? Manda *dossie*.\");\n\nreturn { json: { ...ctx, mensagem: partes.join(\"\\n\\n\") } };"
+        "jsCode": "const ctx = $('Montar Contexto').first().json;\nconst linhas = $input.all().map((i) => i.json);\n\nconst emojiPorCategoria = {\n  SAUDE: \"\\u{1F3E5}\",\n  EDUCACAO: \"\\u{1F393}\",\n  ALIMENTACAO: \"\\u{1F37D}\\u{FE0F}\",\n  TRANSPORTE: \"\\u{1F697}\",\n  MORADIA: \"\\u{1F3E0}\",\n  ESCRITORIO: \"\\u{1F5C2}\\u{FE0F}\",\n  EQUIPAMENTOS: \"\\u{1F5A5}\\u{FE0F}\",\n  SOFTWARE: \"\\u{1F4BE}\",\n  INTERNET_TELEFONIA: \"\\u{1F4F6}\",\n  SERVICOS_PROFISSIONAIS: \"\\u{1F4BC}\",\n  IMPOSTOS_TAXAS: \"\\u{1F9FE}\",\n  OUTROS: \"\\u{1F4CC}\",\n};\n\nconst brl = (v) =>\n  Number(v || 0).toLocaleString(\"pt-BR\", { style: \"currency\", currency: \"BRL\" });\n\nconst validas = linhas.filter((l) => l && l.categoria);\n\nif (validas.length === 0) {\n  return {\n    json: {\n      ...ctx,\n      mensagem:\n        \"Voce ainda nao tem despesas registradas. Manda a foto de um cupom ou descreve a despesa por texto que eu registro pra voce.\",\n    },\n  };\n}\n\nlet totalGeral = 0;\nlet totalDedutivel = 0;\nlet totalPendente = 0;\n\nconst blocos = validas.map((l) => {\n  totalGeral += Number(l.total || 0);\n  totalDedutivel += Number(l.total_dedutivel || 0);\n  totalPendente += Number(l.pendente_revisao || 0);\n\n  const emoji = emojiPorCategoria[l.categoria] || emojiPorCategoria.OUTROS;\n  const nome =\n    l.categoria.charAt(0) + l.categoria.slice(1).toLowerCase().split(\"_\").join(\" \");\n  return emoji + \" \" + nome + \": \" + brl(l.total) + \" (\" + l.quantidade + \")\";\n});\n\nconst partes = [\n  \"*Seu resumo fiscal*\",\n  blocos.join(\"\\n\"),\n  \"*Total:* \" + brl(totalGeral),\n  \"*Dedutivel:* \" + brl(totalDedutivel),\n];\n\n// Deducao reduz a base de calculo do IR, nao o imposto devido. Sem esta\n// linha o total dedutivel acima e lido como dinheiro de volta.\nif (totalDedutivel > 0) {\n  partes.push(\n    \"O valor dedutivel reduz sua base de calculo do IR \\u2014 a economia real depende da sua faixa de tributacao, nao e o valor que voce recebe de volta.\"\n  );\n}\n\nif (totalPendente > 0) {\n  partes.push(\n    \"\\u{23F3} \" +\n      totalPendente +\n      (totalPendente === 1 ? \" lancamento aguarda\" : \" lancamentos aguardam\") +\n      \" revisao humana.\"\n  );\n}\n\npartes.push(\"Quer o PDF completo? Manda *dossie*.\");\n\nreturn { json: { ...ctx, mensagem: partes.join(\"\\n\\n\") } };"
       },
       "id": "beb5428a-4339-4dee-a429-5c9bf68a04dc",
       "name": "Formatar Resumo",
@@ -527,7 +527,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $json.phone, type: \"text\", text: { body: \"Posso registrar despesas (manda foto do cupom ou descreve por texto), mostrar seu resumo fiscal (manda 'resumo') ou gerar seu dossie em PDF (manda 'dossie').\" } }) }}",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $(\"Montar Contexto\").item.json.phone, type: \"text\", text: { body: \"Posso registrar despesas (manda foto do cupom ou descreve por texto), mostrar seu resumo fiscal (manda 'resumo') ou gerar seu dossie em PDF (manda 'dossie').\" } }) }}",
         "options": {}
       },
       "id": "b9550c99-c302-46ca-aa0e-731744a60f86",
@@ -631,6 +631,172 @@
         -620,
         840
       ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-resposta-de-followup",
+              "leftValue": "={{ $json.followup_valor_detectado }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7d2c9a45-1b8e-4c07-9f36-2a5d8e1b4c60",
+      "name": "Resposta de Follow-up?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1740,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-followup-aberto",
+              "leftValue": "={{ $json.followup_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "9e4b1c38-5a7d-4e29-8c14-6b3f0d9a2e75",
+      "name": "Follow-up Aberto?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -960,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/functions/v1/followup-resolve",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SECRET_KEY_SB_FORMAT }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ followup_id: $json.followup_id, usuario_id: $json.usuario_id, texto: $json.text_body }) }}",
+        "options": {}
+      },
+      "id": "b1f6d802-3c95-4a7e-8d20-4f7c1a9b6e38",
+      "name": "Edge - Resolver Follow-up",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1100,
+        -80
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-followup-resolvido",
+              "leftValue": "={{ $json.resolvido }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "c8a37e51-9d24-4b60-8e7f-3a1c5d0b9f46",
+      "name": "Follow-up Resolvido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $(\"Montar Contexto\").item.json.phone, type: \"text\", text: { body: $json.mensagem } }) }}",
+        "options": {}
+      },
+      "id": "d5e920b7-4f18-4c83-9a6d-7b2e8c1f0a39",
+      "name": "WhatsApp - Enviar Resposta do Follow-up",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -620,
+        -160
+      ]
     }
   ],
   "pinData": {},
@@ -672,7 +838,7 @@
       "main": [
         [
           {
-            "node": "Intent Detectado?",
+            "node": "Resposta de Follow-up?",
             "type": "main",
             "index": 0
           }
@@ -744,7 +910,7 @@
         ],
         [
           {
-            "node": "WhatsApp - Enviar Ajuda",
+            "node": "Follow-up Aberto?",
             "type": "main",
             "index": 0
           }
@@ -803,6 +969,71 @@
         [
           {
             "node": "WhatsApp - Enviar Link Conectar Banco",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resposta de Follow-up?": {
+      "main": [
+        [
+          {
+            "node": "Edge - Resolver Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Intent Detectado?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edge - Resolver Follow-up": {
+      "main": [
+        [
+          {
+            "node": "Follow-up Resolvido?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Follow-up Resolvido?": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Enviar Resposta do Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WhatsApp - Enviar Ajuda",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Follow-up Aberto?": {
+      "main": [
+        [
+          {
+            "node": "Edge - Resolver Follow-up",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WhatsApp - Enviar Ajuda",
             "type": "main",
             "index": 0
           }

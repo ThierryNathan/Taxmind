@@ -4,12 +4,22 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 // pluggy-connect-token e a pluggy-item-link passaram a precisar da mesma
 // checagem. Mesmo codigo, um lugar so.
 import { type BootstrapTokenPayload, verifyBootstrapToken } from "../_shared/bootstrap_token.ts";
+// Fase 12: o texto de consentimento e a validacao da versao ficam em _shared
+// para que a Edge Function nunca confie na versao que o navegador afirma, e
+// para que o hash gravado seja sempre calculado aqui.
+import {
+  CONSENTIMENTO_ATUAL,
+  hashTextoConsentimento,
+  versaoConsentimentoAceita,
+} from "../_shared/consentimento.ts";
 
 type BootstrapRequest = {
   token: string;
   email: string;
   cpf: string;
   nome?: string;
+  consentimento_aceito?: boolean;
+  consentimento_versao?: string;
 };
 
 const jsonHeaders = { "content-type": "application/json" };
@@ -41,6 +51,22 @@ serve(async (request) => {
       return json({ error: "invalid_identity_fields" }, 400);
     }
 
+    // O consentimento e o unico ponto de bloqueio desta fase, e ele e checado
+    // no servidor porque o checkbox da tela e apenas a interface do gate: uma
+    // chamada direta a esta function sem consentimento criaria conta com dado
+    // sensivel de saude e sem base legal. Versao desconhecida tambem e recusa
+    // — ver versaoConsentimentoAceita.
+    if (body.consentimento_aceito !== true) {
+      return json({ error: "consentimento_obrigatorio" }, 400);
+    }
+
+    if (!versaoConsentimentoAceita(body.consentimento_versao)) {
+      return json({
+        error: "consentimento_versao_invalida",
+        versao_atual: CONSENTIMENTO_ATUAL.versao,
+      }, 400);
+    }
+
     const redirectTo = new URL(env("SUPABASE_AUTH_REDIRECT_TO", "http://localhost:5173/auth/callback"));
     redirectTo.searchParams.set("wa_id", tokenPayload.wa_id);
 
@@ -65,6 +91,7 @@ serve(async (request) => {
     }
 
     const userId = data?.user?.id ?? null;
+    const consentimentoEm = new Date().toISOString();
     if (userId) {
       await upsertUsuario({
         userId,
@@ -72,7 +99,13 @@ serve(async (request) => {
         nome: body.nome,
         cpfHash,
         telefoneWhatsapp: tokenPayload.phone,
+        consentimentoEm,
       });
+      // Depois do upsert de proposito: a FK aponta para usuarios, e falhar aqui
+      // com o cadastro ja criado e melhor do que o inverso — a linha de
+      // consentimento e recuperavel, um usuario sem cadastro nao tem como
+      // voltar sem novo link.
+      await registrarConsentimento(userId, consentimentoEm);
     }
 
     await recordSessionContext(tokenPayload, email, cpfHash, userId);
@@ -139,6 +172,7 @@ async function upsertUsuario(input: {
   nome?: string;
   cpfHash: string;
   telefoneWhatsapp: string;
+  consentimentoEm: string;
 }) {
   const { error } = await supabase
     .from("usuarios")
@@ -149,12 +183,40 @@ async function upsertUsuario(input: {
       telefone_whatsapp: input.telefoneWhatsapp,
       cpf_hash: input.cpfHash,
       onboarding_concluido: true,
-      consentimento_lgpd_em: null,
+      consentimento_lgpd_em: input.consentimentoEm,
     }, { onConflict: "id" });
 
   if (error) {
     console.error("failed to upsert usuario", error);
     throw new Error("usuario_link_failed");
+  }
+}
+
+/**
+ * Evidencia do consentimento (migration 008).
+ *
+ * O hash e calculado aqui, a partir do texto canonico desta versao, e nao lido
+ * do corpo da requisicao: hash enviado pelo cliente provaria so o que o cliente
+ * quis afirmar. ignoreDuplicates preserva o aceite original quando a mesma
+ * pessoa refaz o onboarding com o mesmo texto — a data que importa e a do
+ * primeiro sim.
+ *
+ * Falha aqui nao derruba o cadastro ja criado: o erro fica no log e o
+ * ponteiro usuarios.consentimento_lgpd_em ja registra que houve aceite.
+ */
+async function registrarConsentimento(userId: string, aceitoEm: string) {
+  const { error } = await supabase
+    .from("consentimentos_lgpd")
+    .upsert({
+      usuario_id: userId,
+      versao: CONSENTIMENTO_ATUAL.versao,
+      texto_hash: await hashTextoConsentimento(),
+      canal: "ONBOARDING_WEB",
+      aceito_em: aceitoEm,
+    }, { onConflict: "usuario_id,versao", ignoreDuplicates: true });
+
+  if (error) {
+    console.error("failed to record consentimento lgpd", error);
   }
 }
 

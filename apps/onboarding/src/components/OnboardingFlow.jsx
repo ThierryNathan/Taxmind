@@ -2,15 +2,20 @@ import { useEffect, useState } from 'react'
 import Screen from './Screen.jsx'
 import { probeBootstrapToken, submitOnboardingProfile } from '../lib/supabaseClient.js'
 import { isValidCpf, maskCpf, normalizeCpf } from '../lib/cpf.js'
+import { CONSENTIMENTO_ATUAL } from '../lib/consentimento.js'
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 export default function OnboardingFlow({ token }) {
-  // 'loading' | 'invalid-token' | 'form' | 'submitting' | 'success' | 'submit-error'
+  // 'loading' | 'invalid-token' | 'form' | 'consentimento' | 'submitting' | 'success' | 'submit-error'
   const [state, setState] = useState(token ? 'loading' : 'invalid-token')
   const [errorMessage, setErrorMessage] = useState('')
   const [fields, setFields] = useState({ nome: '', email: '', cpf: '' })
   const [fieldErrors, setFieldErrors] = useState({})
+  // Nasce false e nunca e pre-marcado: consentimento pre-marcado nao e
+  // consentimento. O estado vive aqui, e nao no submit, para sobreviver ao
+  // "voltar" da tela de consentimento sem perder o que ja foi lido.
+  const [consentimentoAceito, setConsentimentoAceito] = useState(false)
 
   useEffect(() => {
     if (!token) return
@@ -39,9 +44,17 @@ export default function OnboardingFlow({ token }) {
     return Object.keys(errors).length === 0
   }
 
-  async function handleSubmit(event) {
+  // O formulario nao conclui mais o cadastro: ele leva ao consentimento, que e
+  // o ultimo passo. Bloquear aqui e aceitavel porque acontece uma vez so, no
+  // cadastro, junto do que ja e obrigatorio (nome, e-mail, CPF).
+  function handleAvancarParaConsentimento(event) {
     event.preventDefault()
     if (!validateFields()) return
+    setState('consentimento')
+  }
+
+  async function handleConfirmar() {
+    if (!consentimentoAceito) return
 
     setState('submitting')
     try {
@@ -50,6 +63,7 @@ export default function OnboardingFlow({ token }) {
         nome: fields.nome.trim(),
         email: fields.email.trim(),
         cpf: normalizeCpf(fields.cpf),
+        consentimentoVersao: CONSENTIMENTO_ATUAL.versao,
       })
       setState('success')
     } catch (error) {
@@ -79,6 +93,60 @@ export default function OnboardingFlow({ token }) {
             Esse link de cadastro não é mais válido. Volte ao WhatsApp e envie "Oi"
             para o TaxMind novamente — vamos gerar um novo link para você.
           </p>
+        </div>
+      </Screen>
+    )
+  }
+
+  if (state === 'consentimento') {
+    return (
+      <Screen>
+        <div className="flex flex-col gap-4">
+          <div>
+            <h1 className="text-lg font-semibold text-white mb-1">{CONSENTIMENTO_ATUAL.titulo}</h1>
+            <p className="text-white/60 text-sm">{CONSENTIMENTO_ATUAL.intro}</p>
+          </div>
+
+          <div className="flex flex-col gap-3 max-h-[45vh] overflow-y-auto pr-1">
+            {CONSENTIMENTO_ATUAL.itens.map((item) => (
+              <div key={item.titulo} className="rounded-lg bg-[#0b141a] border border-white/10 p-3">
+                <p className="text-sm font-medium text-emerald-400 mb-1">{item.titulo}</p>
+                <p className="text-white/70 text-xs leading-relaxed">{item.texto}</p>
+              </div>
+            ))}
+          </div>
+
+          <label className="flex items-start gap-3 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={consentimentoAceito}
+              onChange={(event) => setConsentimentoAceito(event.target.checked)}
+              className="mt-0.5 h-5 w-5 shrink-0 accent-emerald-600"
+            />
+            <span className="text-white/80 text-xs leading-relaxed">
+              {CONSENTIMENTO_ATUAL.rotuloCheckbox}
+            </span>
+          </label>
+
+          <p className="text-white/40 text-xs">{CONSENTIMENTO_ATUAL.rodape}</p>
+
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setState('form')}
+              className="w-1/3 rounded-lg border border-white/15 text-white/80 hover:bg-white/5 font-medium py-2.5 transition-colors"
+            >
+              Voltar
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirmar}
+              disabled={!consentimentoAceito}
+              className="flex-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-900 disabled:text-white/40 disabled:cursor-not-allowed text-white font-medium py-2.5 transition-colors"
+            >
+              Concordo e concluir cadastro
+            </button>
+          </div>
         </div>
       </Screen>
     )
@@ -131,7 +199,7 @@ export default function OnboardingFlow({ token }) {
           <p className="text-white/70 text-sm">{errorMessage}</p>
           <button
             type="button"
-            onClick={() => setState('form')}
+            onClick={() => setState('consentimento')}
             className="mt-2 w-full rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2.5 transition-colors"
           >
             Tentar novamente
@@ -143,7 +211,7 @@ export default function OnboardingFlow({ token }) {
 
   return (
     <Screen>
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4" noValidate>
+      <form onSubmit={handleAvancarParaConsentimento} className="flex flex-col gap-4" noValidate>
         <div>
           <h1 className="text-lg font-semibold text-white mb-1">Confirme seu cadastro</h1>
           <p className="text-white/60 text-sm">
@@ -194,7 +262,7 @@ export default function OnboardingFlow({ token }) {
           type="submit"
           className="mt-2 w-full rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-2.5 transition-colors"
         >
-          Confirmar cadastro
+          Continuar
         </button>
       </form>
     </Screen>

@@ -1,3 +1,12 @@
+// Copia do prompt fiscal de producao para o runtime das Edge Functions.
+//
+// O bundle do `supabase functions deploy` so empacota supabase/functions/, e
+// backend/prompts/taxmind_system_prompt.js esta fora dessa fronteira — dai a
+// copia. Sao tres copias vivas do mesmo texto (esta, a de backend/prompts e a
+// embutida no node "Preparar Contexto" do n8n), e
+// tests/n8n_fase12_test.ts compara as tres: editar uma so quebra o teste.
+//
+// Fonte da verdade para edicao: backend/prompts/taxmind_system_prompt.js.
 export const TAXMIND_SYSTEM_PROMPT = String.raw`
 Voce e o TaxMind, um copiloto fiscal brasileiro que funciona pelo WhatsApp.
 
