@@ -163,7 +163,7 @@ function semear(opcoes: {
     usuario_id: USUARIO_ID,
     recibo_id: RECIBO_ID,
     campo_alvo: "documento_prestador",
-    pergunta: "Para confirmar se e dedutivel, voce tem o CNPJ ou CPF de Clinica Vida?",
+    pergunta: "Para confirmar se é dedutível, você tem o CNPJ ou CPF de Clinica Vida?",
     mensagens_restantes: 2,
     expira_em: new Date(Date.now() + (opcoes.expiraEmMinutos ?? 20) * MINUTO).toISOString(),
     respondida_em: null,
@@ -460,6 +460,121 @@ Deno.test("reclassificacao contraditoria nao promove: quem manda e a derivacao",
   assertEquals(corpo.promovido, false);
   assertEquals(recibo().status, "REVISAO_HUMANA");
   assertEquals(recibo().metadados_ia.campos_bloqueantes, ["documento_prestador"]);
+});
+
+// --- resposta sem conteudo extraivel --------------------------------------
+
+Deno.test('"Sim" nao fecha a pendencia, e o CNPJ seguinte ainda resolve', async () => {
+  // A sequencia inteira do bug real: perguntamos o CNPJ do proctologista, a
+  // pessoa respondeu "Sim", e a reclassificacao fechou a pendencia com
+  // "Obrigado, anotei essa informacao na despesa" — sem ter anotado nada. O
+  // CNPJ que veio depois nao tinha mais pendencia aberta para responder.
+  semear();
+
+  // Se a reclassificacao for chamada, o mock devolve uma analise que fecharia
+  // a pendencia. E de proposito: o teste tem que provar que a function nao
+  // chega ate ela, e nao que o Gemini se comportou bem.
+  respostaGemini = blocoExpense({
+    categoria: "SAUDE",
+    deducibilidade: "INDETERMINADO",
+    estabelecimento: null,
+    documento_prestador: null,
+    requer_revisao_humana: true,
+    motivos_revisao: ["Falta documento do prestador"],
+  });
+
+  const primeira = await resolver({
+    followup_id: FOLLOWUP_ID,
+    usuario_id: USUARIO_ID,
+    texto: "Sim",
+  });
+
+  assertEquals(primeira.corpo.resolvido, false);
+  assertEquals(primeira.corpo.motivo, "SEM_CONTEUDO");
+  assertEquals(primeira.corpo.mensagem, null);
+  // Nao ha o que reclassificar: a guarda vem antes da chamada de IA.
+  assertEquals(chamadasGemini, 0);
+
+  // A pendencia continua aberta e o recibo intacto.
+  assertEquals(followup().respondida_em, null);
+  assertEquals(followup().descartada_em, null);
+  assertEquals(followup().resolucao, null);
+  assertEquals(recibo().documento_prestador, null);
+  assertEquals(recibo().status, "REVISAO_HUMANA");
+  assertEquals(recibo().metadados_ia.reclassificacoes, undefined);
+
+  // E a mensagem seguinte, agora com o documento, resolve normalmente.
+  const segunda = await resolver(comDocumento(`o cnpj é ${CNPJ}`));
+
+  assertEquals(segunda.corpo.resolvido, true);
+  assertEquals(segunda.corpo.modo, "CAMPO_PREENCHIDO");
+  assertEquals(segunda.corpo.promovido, true);
+  assertEquals(recibo().documento_prestador, "11.222.333/0001-81");
+  assertEquals(recibo().status, "APROVADO_AUTOMATICAMENTE");
+  assertEquals(followup().resolucao, "CAMPO_PREENCHIDO");
+});
+
+Deno.test("confirmacao e negacao secas nunca fecham a pendencia", async () => {
+  // As dez respostas medidas contra o Gemini real, onde 22 de 30 execucoes
+  // reclassificaram — de forma instavel, com "Sim" fechando 1/3 e "sim" 2/3.
+  // A guarda deterministica tira o desfecho do sorteio.
+  for (const texto of [
+    "Sim",
+    "sim",
+    "ok",
+    "beleza",
+    "tenho sim",
+    "com certeza",
+    "claro",
+    "isso",
+    "aham",
+    "nao tenho",
+    "não tenho",
+    "obrigado",
+    "já mando",
+  ]) {
+    semear();
+    // Qualquer chamada de IA aqui ja seria falha: nao ha o que reclassificar.
+    respostaGemini = null;
+
+    const { corpo } = await resolver({
+      followup_id: FOLLOWUP_ID,
+      usuario_id: USUARIO_ID,
+      texto,
+    });
+
+    assertEquals(corpo.resolvido, false, texto);
+    assertEquals(corpo.motivo, "SEM_CONTEUDO", texto);
+    assertEquals(chamadasGemini, 0, texto);
+    assertEquals(followup().respondida_em, null, texto);
+    assertEquals(recibo().status, "REVISAO_HUMANA", texto);
+  }
+});
+
+Deno.test("texto com conteudo continua chegando a reclassificacao", async () => {
+  // O contrapeso do teste acima: a guarda nao pode engolir resposta de
+  // verdade. "nao tenho o papel" comeca igual a uma negacao seca e termina
+  // dizendo o que foi a despesa.
+  semear();
+  respostaGemini = blocoExpense({
+    categoria: "SAUDE",
+    deducibilidade: "INDETERMINADO",
+    estabelecimento: "Clinica Vida",
+    documento_prestador: null,
+    requer_revisao_humana: true,
+    motivos_revisao: ["Falta documento do prestador"],
+  });
+
+  const { corpo } = await resolver({
+    followup_id: FOLLOWUP_ID,
+    usuario_id: USUARIO_ID,
+    texto: "nao tenho o papel, mas foi na Clinica Vida",
+  });
+
+  assertEquals(corpo.resolvido, true);
+  assertEquals(corpo.modo, "RECLASSIFICADO");
+  assertEquals(chamadasGemini, 1);
+  assertEquals(recibo().estabelecimento, "Clinica Vida");
 });
 
 Deno.test("mensagem sem relacao nao mexe no recibo nem fecha a pendencia", async () => {

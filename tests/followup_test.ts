@@ -22,6 +22,7 @@ import {
   formatarDocumento,
   perguntaParaCampo,
   type PendenciaFollowup,
+  respostaSemConteudo,
 } from "../supabase/functions/_shared/followup.ts";
 
 // CNPJ e CPF sinteticos com digito verificador coerente.
@@ -117,10 +118,75 @@ Deno.test("mascara so na exibicao", () => {
   assertEquals(formatarDocumento("123"), "123");
 });
 
+Deno.test("resposta sem conteudo extraivel e reconhecida como tal", () => {
+  // "Sim" e a resposta natural para "voce tem o CNPJ?" — e nao responde nada.
+  // Era o caso do bug: seguia para a reclassificacao, voltava com uma analise
+  // sem estabelecimento e sem documento, e mesmo assim fechava a pendencia.
+  for (
+    const texto of [
+      "Sim",
+      "sim",
+      "SIM!",
+      "ok",
+      "Ok.",
+      "beleza",
+      "blz",
+      "tenho sim",
+      "com certeza",
+      "claro",
+      "isso",
+      "aham",
+      "uhum",
+      "nao tenho",
+      "não tenho",
+      "sim, eu tenho",
+      "já mando",
+      "deixa eu ver",
+      "só um minuto",
+      "vou procurar",
+      "obrigado",
+      "tudo bem",
+      "",
+      "   ",
+      "...",
+    ]
+  ) {
+    assert(respostaSemConteudo(texto), `deveria ser sem conteudo: ${JSON.stringify(texto)}`);
+  }
+});
+
+Deno.test("resposta com qualquer dado real passa pela guarda", () => {
+  // O contrapeso: a lista e negra e de mensagem INTEIRA. Basta uma palavra de
+  // fora — nome de lugar, tipo de servico — para a mensagem seguir para a
+  // reclassificacao, que e quem sabe ler evidencia.
+  for (
+    const texto of [
+      "foi na clinica Vida",
+      "clinica Vida",
+      "consulta com psicologo",
+      "dr souza",
+      "foi no hospital sirio",
+      "tenho sim, e a clinica vida",
+      "nao tenho o papel mas foi consulta com dentista",
+      "voces atendem no sabado?",
+    ]
+  ) {
+    assert(!respostaSemConteudo(texto), `engoliu resposta real: ${JSON.stringify(texto)}`);
+  }
+});
+
+Deno.test("qualquer digito na mensagem desliga a guarda", () => {
+  // Documento e valor sao digitos. Nenhuma mensagem com numero pode ser
+  // descartada aqui, nem quando o resto do texto e so confirmacao.
+  assert(!respostaSemConteudo(`sim, ${CNPJ}`));
+  assert(!respostaSemConteudo("tenho sim 11.222.333/0001-81"));
+  assert(!respostaSemConteudo("ok 600"));
+});
+
 Deno.test("pergunta cita o estabelecimento quando ele e conhecido", () => {
   assertEquals(
     perguntaParaCampo("documento_prestador", { estabelecimento: "Clinica Vida" }),
-    "Para confirmar se e dedutivel, voce tem o CNPJ ou CPF de Clinica Vida?",
+    "Para confirmar se é dedutível, você tem o CNPJ ou CPF de Clinica Vida?",
   );
   assert(
     perguntaParaCampo("documento_prestador", {}).includes("do prestador"),

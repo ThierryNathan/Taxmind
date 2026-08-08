@@ -34,6 +34,7 @@ import {
   formatarDocumento,
   montarContextoReclassificacao,
   type PendenciaFollowup,
+  respostaSemConteudo,
 } from "../_shared/followup.ts";
 import { TAXMIND_SYSTEM_PROMPT } from "../_shared/prompt_fiscal.ts";
 
@@ -209,6 +210,23 @@ async function preencherCampo(
 // --- modo RECLASSIFICADO --------------------------------------------------
 
 async function reclassificar(pendencia: PendenciaComDono, recibo: Recibo, texto: string) {
+  // Antes de qualquer coisa: a resposta carrega alguma informacao?
+  //
+  // "Sim" e a resposta natural para "voce tem o CNPJ?", e ela nao responde
+  // nada. Sem esta guarda a mensagem ia para a reclassificacao, voltava com
+  // uma analise identica a original — estabelecimento e documento vazios do
+  // mesmo jeito — e mesmo assim fechava a pendencia com "anotei essa
+  // informacao". O CNPJ que viesse na mensagem seguinte ja nao teria pendencia
+  // aberta para responder.
+  //
+  // Fica ANTES de reivindicar: pendencia que nao foi respondida nao pode ser
+  // consumida. O orcamento de mensagens segue sendo debitado la na
+  // whatsapp-webhook, como em qualquer mensagem que nao e resposta — entao isto
+  // nao vira pendencia imortal.
+  if (respostaSemConteudo(texto)) {
+    return { resolvido: false, motivo: "SEM_CONTEUDO" as const, mensagem: null };
+  }
+
   const analise = await pedirReclassificacao(recibo, pendencia.pergunta, texto);
 
   if (!analise) {

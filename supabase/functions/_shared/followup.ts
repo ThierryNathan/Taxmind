@@ -114,10 +114,10 @@ export function perguntaParaCampo(
   if (campo === "documento_prestador") {
     const onde = contexto.estabelecimento?.trim();
     return onde
-      ? `Para confirmar se e dedutivel, voce tem o CNPJ ou CPF de ${onde}?`
-      : "Para confirmar se e dedutivel, voce tem o CNPJ ou CPF do prestador?";
+      ? `Para confirmar se é dedutível, você tem o CNPJ ou CPF de ${onde}?`
+      : "Para confirmar se é dedutível, você tem o CNPJ ou CPF do prestador?";
   }
-  return "Para confirmar se e dedutivel, onde foi essa despesa? Pode me dizer o nome do estabelecimento.";
+  return "Para confirmar se é dedutível, onde foi essa despesa? Pode me dizer o nome do estabelecimento.";
 }
 
 /**
@@ -310,6 +310,74 @@ export function formatarDocumento(numero: string): string {
   return numero;
 }
 
+// Palavras que, sozinhas, nao carregam evidencia nenhuma sobre a despesa:
+// confirmacao, negacao, saudacao, cortesia e promessa de voltar depois.
+//
+// A lista e usada como lista NEGRA de mensagem inteira, e nao como lista branca
+// de resposta valida: so recusa quando TODA palavra da mensagem esta aqui. Uma
+// palavra de fora — nome de lugar, tipo de servico, qualquer coisa — ja e
+// evidencia potencial e segue o caminho normal. O vies e o de sempre: na
+// duvida, deixar passar para a IA decidir.
+const TERMOS_SEM_CONTEUDO = [
+  // confirmacao e negacao
+  "sim", "s", "nao", "n", "claro", "certo", "certeza", "com", "exato",
+  "exatamente", "isso", "aham", "uhum", "hum", "positivo", "negativo", "ok",
+  "okay", "okey", "blz", "beleza", "confirmo", "confirmado",
+  // posse, que e o verbo da pergunta
+  "tenho", "tem", "temos", "ter", "tinha", "consigo", "acho", "acredito",
+  "sei", "la", "talvez",
+  // cortesia e reacao
+  "obrigado", "obrigada", "obg", "vlw", "valeu", "show", "top", "perfeito",
+  "otimo", "legal", "bom", "boa", "bem", "tudo", "opa", "oi", "ola", "eae",
+  "entendi", "entendido", "certinho",
+  // promessa de voltar depois
+  "ja", "agora", "depois", "mais", "tarde", "so", "um", "uma", "momento",
+  "minuto", "minutinho", "pera", "perai", "calma", "deixa", "vou", "ver",
+  "procurar", "olhar", "mandar", "mando", "envio", "enviar", "te",
+  // glue que sobra em volta do que esta acima
+  "eu", "e", "a", "o", "que", "de", "do", "da", "ele", "ela", "dele", "dela",
+  "aqui", "ali", "ta", "tah", "esta", "pra", "para", "por", "no", "na", "em",
+];
+
+/**
+ * A mensagem e uma resposta sem nenhuma informacao extraivel?
+ *
+ * Existe por causa de um caso real: perguntamos o CNPJ do proctologista, a
+ * pessoa respondeu "Sim", e a reclassificacao tratou isso como evidencia nova —
+ * fechou a pendencia com uma confirmacao enganosa ("anotei essa informacao") e
+ * a mensagem SEGUINTE, com o CNPJ de verdade, ja nao tinha pendencia para
+ * responder.
+ *
+ * A instrucao SEM_RELACAO do contexto nao cobria o caso porque ela testa
+ * RELACAO, e "Sim" e perfeitamente relacionado a pergunta — so nao carrega
+ * dado. Medido contra o Gemini real na temperatura de producao, dez respostas
+ * desse tipo reclassificaram em 22 de 30 execucoes, e de forma instavel: "Sim"
+ * fechou 1/3, "sim" 2/3, "ok" 0/3. Em todas, a analise voltou com
+ * estabelecimento e documento vazios — nao havia o que extrair.
+ *
+ * Este filtro roda ANTES da chamada de IA. Nao e otimizacao: e o que garante
+ * que o desfecho de "Sim" nao dependa de sorteio do modelo. A instrucao no
+ * contexto continua existindo para as formas que a lista nao preve.
+ *
+ * Qualquer digito na mensagem faz devolver false na hora: documento e valor sao
+ * digitos, e nenhuma mensagem com numero pode ser descartada por esta funcao.
+ */
+export function respostaSemConteudo(texto: string | null | undefined): boolean {
+  if (!texto) return true;
+
+  const semAcento = texto
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase();
+
+  if (/\d/.test(semAcento)) return false;
+
+  const palavras = semAcento.replace(/[^a-z]+/g, " ").split(" ").filter(Boolean);
+  if (palavras.length === 0) return true;
+
+  return palavras.every((palavra) => TERMOS_SEM_CONTEUDO.includes(palavra));
+}
+
 /**
  * Contexto da reclassificacao por evidencia nova em texto livre.
  *
@@ -351,8 +419,17 @@ export function montarContextoReclassificacao(
     "",
     "Reclassifique a MESMA despesa considerando a resposta como evidencia nova.",
     "Mantenha valor e data_despesa exatamente como estao acima.",
-    "Se a resposta do usuario nao tiver nenhuma relacao com essa despesa,",
-    "responda exatamente SEM_RELACAO, sem tags e sem JSON.",
+    "",
+    "Responda exatamente SEM_RELACAO, sem tags e sem JSON, em DOIS casos:",
+    "1. a resposta nao tem nenhuma relacao com essa despesa;",
+    "2. a resposta nao acrescenta NENHUMA informacao nova sobre a despesa,",
+    "   ainda que seja uma reacao natural a pergunta. Confirmacao, negacao ou",
+    "   cortesia secas entram aqui: sim, ok, tenho, nao tenho, claro, beleza,",
+    "   ja mando, deixa eu ver. Nada disso identifica prestador, servico ou",
+    "   estabelecimento, e reclassificar por cima disso apagaria a pendencia",
+    "   sem ter respondido a pergunta.",
+    "So reclassifique quando houver dado novo de verdade: nome do lugar, tipo",
+    "de servico, quem atendeu, natureza da despesa ou documento.",
   ].join("\n");
 }
 

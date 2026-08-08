@@ -157,6 +157,54 @@ follow-up entra ao lado, em `metadados_ia.followups` ou
 Promocao nunca rebaixa, e `SEM_RELACAO` (mensagem desconexa) nao mexe no recibo
 nem fecha a pendencia.
 
+### A resposta que nao responde nada
+
+Antes de chamar a IA, o modo `RECLASSIFICADO` pergunta uma coisa mais basica: a
+mensagem carrega **alguma** informacao? `respostaSemConteudo` recusa a mensagem
+cujas palavras sao todas confirmacao, negacao, cortesia ou promessa de voltar
+depois — e devolve `SEM_CONTEUDO`, com a pendencia intacta.
+
+O motivo e um caso real: perguntamos o CNPJ do proctologista, a pessoa respondeu
+`Sim`, e a reclassificacao tratou isso como evidencia nova. Fechou a pendencia
+com *"Obrigado, anotei essa informacao na despesa"* — sem ter anotado nada — e o
+CNPJ que veio na mensagem **seguinte** ja nao tinha pendencia aberta para
+responder.
+
+A instrucao `SEM_RELACAO` nao cobria o caso porque ela testa **relacao**, e
+`Sim` e perfeitamente relacionado a pergunta; so nao carrega dado. Medido contra
+o Gemini real na temperatura de producao, dez respostas desse tipo
+reclassificaram em **22 de 30 execucoes**, e de forma instavel — `Sim` fechou
+1/3, `sim` 2/3, `ok` 0/3. Em todas, a analise voltou com estabelecimento e
+documento vazios: nao havia o que extrair.
+
+Duas camadas, porque nenhuma sozinha basta:
+
+| | Cobre | Como se comporta |
+| --- | --- | --- |
+| `respostaSemConteudo` (codigo) | As formas previstas: `sim`, `ok`, `tenho sim`, `nao tenho`, `beleza`, `ja mando` | Deterministico, roda antes da IA, tira o desfecho do sorteio do modelo |
+| Instrucao no contexto | O que a lista nao preve: `acho que sim rs`, `pode deixar comigo`, `nossa, esqueci total` | 18/18 no Gemini real |
+
+A lista e **negra e de mensagem inteira**: so recusa quando toda palavra esta
+nela, e qualquer digito no texto a desliga na hora, porque documento e valor sao
+digitos. Uma palavra de fora — nome de lugar, tipo de servico — ja e evidencia
+potencial e segue para a IA. Mesmo vies do `extrairDocumento`: na duvida, deixa
+passar.
+
+A guarda fica **antes** de reivindicar a pendencia — pendencia que nao foi
+respondida nao pode ser consumida. O orcamento de mensagens continua sendo
+debitado na `whatsapp-webhook`, como em qualquer mensagem que nao e resposta,
+entao isto nao cria pendencia imortal: `Sim` gasta uma das duas, e o CNPJ
+seguinte ainda resolve.
+
+Efeito colateral util: `nao tenho` tambem para aqui. Antes ele reclassificava e
+**rebaixava** a despesa para `NAO_DEDUTIVEL` (3/3 no Gemini real) — uma despesa
+de saude marcada como nao dedutivel porque a pessoa nao estava com o recibo na
+mao.
+
+Consequencia a conhecer: sem `resolvido`, o `consulta-e-dossie` cai no texto de
+ajuda de sempre, que e o mesmo desfecho que `SEM_RELACAO` ja tinha. A pendencia
+segue aberta ate o orcamento ou os 30 minutos acabarem.
+
 ## O que acontece quando a desambiguacao erra
 
 Um caso real, que rendeu as duas correcoes atuais. Sequencia:

@@ -336,7 +336,7 @@ Boa, registrei como despesa de saude e vou deixar separado para revisao do conta
   "codigos_medicos_identificados": [],
   "termos_auditoria_identificados": ["consulta"],
   "alertas_lgpd": ["Documento pode conter dado sensivel de saude"],
-  "pergunta_de_followup": "Voce tem o recibo com CPF ou CNPJ do prestador?",
+  "pergunta_de_followup": "Você tem o recibo com CPF ou CNPJ do prestador?",
   "mensagem_usuario": "Boa, registrei como despesa de saude e vou deixar separado para revisao do contador."
 }</expense>
 `;
