@@ -263,7 +263,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const contexto = $(\"Preparar Contexto\").item.json;\nconst parsed = $(\"Extrair Bloco Expense\").item.json.expense;\nconst sessaoResp = $input.item.json;\nconst usuarioId = Array.isArray(sessaoResp) ? (sessaoResp[0] && sessaoResp[0].usuario_id) : (sessaoResp && sessaoResp.usuario_id);\n\nif (!usuarioId) {\n  throw new Error(\"Sessao \" + contexto.session_id + \" ainda nao tem usuario_id vinculado (onboarding pendente)\");\n}\n\n// Data inferida: mensagem sem referencia temporal nao gera pergunta de volta\n// (a maioria das mensagens nao cita data mesmo sendo do dia). Cai na data de\n// recebimento e fica marcada em metadados_ia.data_inferida, que e so rastro de\n// auditoria. A linha de status abaixo le requer_revisao_humana e NAO le\n// data_inferida: data inferida sozinha nunca manda para revisao humana.\nconst dataRecebimento = contexto.data_recebimento || null;\nconst dataDaIa = parsed.data_despesa || null;\nconst dataDespesa = dataDaIa || dataRecebimento;\nconst dataInferida = dataDaIa ? parsed.data_inferida === true : Boolean(dataRecebimento);\n\n// A IA pode listar a data em campos_ausentes apesar da regra do prompt. Com a\n// data preenchida por inferencia ela deixa de ser pendencia de auditoria.\nconst camposAusentes = (parsed.campos_ausentes || []).filter(\n  (campo) => !dataInferida || !/^data/i.test(String(campo))\n);\n\n// Campos que, preenchidos, sozinhos destravariam a aprovacao. Filtrados para\n// os respondiveis: a IA pode citar campo que nao da para perguntar.\nconst CAMPOS_FOLLOWUP = [\"documento_prestador\", \"estabelecimento\"];\nconst bloqueantes = (parsed.campos_bloqueantes || []).filter((campo) =>\n  CAMPOS_FOLLOWUP.includes(campo)\n);\n\nconst metadadosIa = {\n  ...parsed,\n  data_despesa: dataDespesa,\n  data_inferida: dataInferida,\n  campos_ausentes: camposAusentes,\n  campos_bloqueantes: bloqueantes,\n  data_despesa_original_ia: dataDaIa,\n  data_recebimento_mensagem: dataRecebimento,\n};\n\nconst status = parsed.requer_revisao_humana ? \"REVISAO_HUMANA\" : \"RECEBIDO\";\n\n// Follow-up conversacional (fase 13). So vale para despesa que ficou em\n// revisao por falta de campo ESTRUTURADO e objetivamente respondivel; o campo\n// vem de campos_bloqueantes, que a IA so preenche quando aquele dado sozinho\n// destravaria a aprovacao. Ambiguidade de categoria fiscal nunca entra aqui.\n//\n// A pergunta e anexada a confirmacao, nao a substitui: a despesa JA foi\n// gravada e confirmada, e ignorar a pergunta nao trava nada.\nconst followupCampo = status === \"REVISAO_HUMANA\" ? (bloqueantes[0] || null) : null;\n\n// Espelho de perguntaParaCampo em supabase/functions/_shared/followup.ts;\n// tests/n8n_fase13_test.ts compara os dois textos.\nfunction perguntaParaCampo(campo, estabelecimento) {\n  if (campo === \"documento_prestador\") {\n    const onde = (estabelecimento || \"\").trim();\n    return onde\n      ? \"Para confirmar se e dedutivel, voce tem o CNPJ ou CPF de \" + onde + \"?\"\n      : \"Para confirmar se e dedutivel, voce tem o CNPJ ou CPF do prestador?\";\n  }\n  return \"Para confirmar se e dedutivel, onde foi essa despesa? Pode me dizer o nome do estabelecimento.\";\n}\n\nconst followupPergunta = followupCampo\n  ? perguntaParaCampo(followupCampo, parsed.estabelecimento)\n  : null;\n\nconst mensagemBase = $(\"Extrair Bloco Expense\").item.json.mensagem_usuario;\nconst mensagemFinal = followupPergunta\n  ? mensagemBase + \"\\n\\n\" + followupPergunta\n  : mensagemBase;\n\nreturn {\n  json: {\n    usuario_id: usuarioId,\n    sessao_whatsapp_id: contexto.session_id,\n    origem: contexto.origem,\n    status,\n    descricao: parsed.descricao,\n    estabelecimento: parsed.estabelecimento || null,\n    documento_prestador: parsed.documento_prestador || null,\n    data_despesa: dataDespesa,\n    valor: parsed.valor,\n    categoria: parsed.categoria,\n    deducibilidade: parsed.deducibilidade,\n    justificativa_deducibilidade: parsed.justificativa_deducibilidade || null,\n    confidence_score: parsed.confidence_score,\n    requer_revisao_humana: parsed.requer_revisao_humana,\n    possui_indicio_tuss_cbhpm: parsed.possui_indicio_tuss_cbhpm || false,\n    codigos_medicos_identificados: parsed.codigos_medicos_identificados || [],\n    termos_auditoria_identificados: parsed.termos_auditoria_identificados || [],\n    arquivo_hash_sha256: contexto.media_sha256 || null,\n    metadados_ia: metadadosIa,\n    mensagem_usuario: mensagemFinal,\n    followup_campo: followupCampo,\n    followup_pergunta: followupPergunta,\n    wa_id: contexto.wa_id,\n  },\n};"
+        "jsCode": "const contexto = $(\"Preparar Contexto\").item.json;\nconst parsed = $(\"Extrair Bloco Expense\").item.json.expense;\nconst sessaoResp = $input.item.json;\nconst usuarioId = Array.isArray(sessaoResp) ? (sessaoResp[0] && sessaoResp[0].usuario_id) : (sessaoResp && sessaoResp.usuario_id);\n\nif (!usuarioId) {\n  throw new Error(\"Sessao \" + contexto.session_id + \" ainda nao tem usuario_id vinculado (onboarding pendente)\");\n}\n\n// Defesa em profundidade contra classificacao errada da IA. A coluna valor tem\n// constraint valor > 0 (recibos_valor_positivo_chk) e o node de insert nao trata\n// erro: a violacao derruba a execucao ANTES do node que responde no WhatsApp, e\n// a pessoa fica sem recibo E sem resposta nenhuma.\n//\n// Nao e hipotese: quando chega aqui um texto que nao descreve despesa — uma\n// resposta de follow-up que nao foi reconhecida como resposta, por exemplo — o\n// Gemini devolve valor 0 tentando dar sentido a mensagem.\nconst valorBruto = parsed.valor === null || parsed.valor === undefined ? \"\" : parsed.valor;\nconst valorNumero = typeof valorBruto === \"number\"\n  ? valorBruto\n  : Number(String(valorBruto).replace(/\\s/g, \"\").replace(\",\", \".\"));\nconst valorValido = Number.isFinite(valorNumero) && valorNumero > 0;\n\n// A mensagem existe para o caso invalido nao virar silencio. Ela pede a despesa\n// inteira de novo, e nao so o valor: sem recibo gravado nao ha lancamento ao\n// qual um valor solto pudesse se juntar.\nconst mensagemValorInvalido = \"Não consegui identificar o valor dessa despesa, então não registrei nada.\\n\\nSe for um lançamento, me manda de novo com o valor junto — por exemplo: \\\"dentista 500 reais\\\".\";\n\n// Data inferida: mensagem sem referencia temporal nao gera pergunta de volta\n// (a maioria das mensagens nao cita data mesmo sendo do dia). Cai na data de\n// recebimento e fica marcada em metadados_ia.data_inferida, que e so rastro de\n// auditoria. A linha de status abaixo le requer_revisao_humana e NAO le\n// data_inferida: data inferida sozinha nunca manda para revisao humana.\nconst dataRecebimento = contexto.data_recebimento || null;\nconst dataDaIa = parsed.data_despesa || null;\nconst dataDespesa = dataDaIa || dataRecebimento;\nconst dataInferida = dataDaIa ? parsed.data_inferida === true : Boolean(dataRecebimento);\n\n// A IA pode listar a data em campos_ausentes apesar da regra do prompt. Com a\n// data preenchida por inferencia ela deixa de ser pendencia de auditoria.\nconst camposAusentes = (parsed.campos_ausentes || []).filter(\n  (campo) => !dataInferida || !/^data/i.test(String(campo))\n);\n\n// Campos que, preenchidos, sozinhos destravariam a aprovacao. Filtrados para\n// os respondiveis: a IA pode citar campo que nao da para perguntar.\nconst CAMPOS_FOLLOWUP = [\"documento_prestador\", \"estabelecimento\"];\nconst bloqueantes = (parsed.campos_bloqueantes || []).filter((campo) =>\n  CAMPOS_FOLLOWUP.includes(campo)\n);\n\nconst metadadosIa = {\n  ...parsed,\n  data_despesa: dataDespesa,\n  data_inferida: dataInferida,\n  campos_ausentes: camposAusentes,\n  campos_bloqueantes: bloqueantes,\n  data_despesa_original_ia: dataDaIa,\n  data_recebimento_mensagem: dataRecebimento,\n};\n\nconst status = parsed.requer_revisao_humana ? \"REVISAO_HUMANA\" : \"RECEBIDO\";\n\n// Follow-up conversacional (fase 13). So vale para despesa que ficou em\n// revisao por falta de campo ESTRUTURADO e objetivamente respondivel; o campo\n// vem de campos_bloqueantes, que a IA so preenche quando aquele dado sozinho\n// destravaria a aprovacao. Ambiguidade de categoria fiscal nunca entra aqui.\n//\n// A pergunta e anexada a confirmacao, nao a substitui: a despesa JA foi\n// gravada e confirmada, e ignorar a pergunta nao trava nada.\nconst followupCampo = status === \"REVISAO_HUMANA\" ? (bloqueantes[0] || null) : null;\n\n// Espelho de perguntaParaCampo em supabase/functions/_shared/followup.ts;\n// tests/n8n_fase13_test.ts compara os dois textos.\nfunction perguntaParaCampo(campo, estabelecimento) {\n  if (campo === \"documento_prestador\") {\n    const onde = (estabelecimento || \"\").trim();\n    return onde\n      ? \"Para confirmar se e dedutivel, voce tem o CNPJ ou CPF de \" + onde + \"?\"\n      : \"Para confirmar se e dedutivel, voce tem o CNPJ ou CPF do prestador?\";\n  }\n  return \"Para confirmar se e dedutivel, onde foi essa despesa? Pode me dizer o nome do estabelecimento.\";\n}\n\nconst followupPergunta = followupCampo\n  ? perguntaParaCampo(followupCampo, parsed.estabelecimento)\n  : null;\n\nconst mensagemBase = $(\"Extrair Bloco Expense\").item.json.mensagem_usuario;\nconst mensagemFinal = followupPergunta\n  ? mensagemBase + \"\\n\\n\" + followupPergunta\n  : mensagemBase;\n\nreturn {\n  json: {\n    usuario_id: usuarioId,\n    sessao_whatsapp_id: contexto.session_id,\n    origem: contexto.origem,\n    status,\n    descricao: parsed.descricao,\n    estabelecimento: parsed.estabelecimento || null,\n    documento_prestador: parsed.documento_prestador || null,\n    data_despesa: dataDespesa,\n    valor: valorValido ? valorNumero : null,\n    categoria: parsed.categoria,\n    deducibilidade: parsed.deducibilidade,\n    justificativa_deducibilidade: parsed.justificativa_deducibilidade || null,\n    confidence_score: parsed.confidence_score,\n    requer_revisao_humana: parsed.requer_revisao_humana,\n    possui_indicio_tuss_cbhpm: parsed.possui_indicio_tuss_cbhpm || false,\n    codigos_medicos_identificados: parsed.codigos_medicos_identificados || [],\n    termos_auditoria_identificados: parsed.termos_auditoria_identificados || [],\n    arquivo_hash_sha256: contexto.media_sha256 || null,\n    metadados_ia: metadadosIa,\n    mensagem_usuario: mensagemFinal,\n    followup_campo: followupCampo,\n    followup_pergunta: followupPergunta,\n    valor_valido: valorValido,\n    mensagem_valor_invalido: mensagemValorInvalido,\n    wa_id: contexto.wa_id,\n  },\n};"
       },
       "id": "1ec21b50-753b-478c-bf1a-667fd39edd7b",
       "name": "Montar Payload do Recibo",
@@ -272,6 +272,72 @@
       "position": [
         1320,
         160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-valor-positivo",
+              "leftValue": "={{ $json.valor_valido }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "6d2b9c41-0f57-4c8a-9d33-1b7e4a5c8f02",
+      "name": "Valor Válido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $(\"Preparar Contexto\").item.json.phone, type: \"text\", text: { body: $(\"Montar Payload do Recibo\").item.json.mensagem_valor_invalido } }) }}",
+        "options": {}
+      },
+      "id": "9f4c7e13-58a2-4b06-8e21-3d90c6b7a145",
+      "name": "WhatsApp - Pedir Valor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        480
       ]
     },
     {
@@ -309,7 +375,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1540,
+        1760,
         160
       ]
     },
@@ -344,7 +410,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        1760,
+        1980,
         160
       ]
     },
@@ -392,7 +458,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1980,
+        2200,
         60
       ]
     },
@@ -423,7 +489,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2200,
+        2420,
         160
       ]
     },
@@ -457,7 +523,7 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        1980,
+        2200,
         320
       ]
     },
@@ -492,7 +558,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        2200,
+        2420,
         320
       ],
       "onError": "continueRegularOutput"
@@ -621,7 +687,7 @@
       "main": [
         [
           {
-            "node": "Supabase - Inserir Recibo",
+            "node": "Valor Válido?",
             "type": "main",
             "index": 0
           }
@@ -691,6 +757,24 @@
         [
           {
             "node": "WhatsApp - Enviar Resposta ao Usuário",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valor Válido?": {
+      "main": [
+        [
+          {
+            "node": "Supabase - Inserir Recibo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WhatsApp - Pedir Valor",
             "type": "main",
             "index": 0
           }

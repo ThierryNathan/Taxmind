@@ -65,8 +65,11 @@ pendencia expirar nao custa nada.
 1. **Midia nunca responde.** Foto de recibo e lancamento novo; so gasta orcamento.
 2. **Casamento deterministico** do formato esperado. So `documento_prestador`
    tem resposta reconhecivel sem IA, porque CNPJ e CPF tem digito verificador.
-   Qualquer palavra fora de uma lista curta de prefixos ("cnpj", "e o", "aqui
-   esta") faz recusar: `paguei 11222333000181 no mercado` **nao** e resposta.
+   O documento e procurado em **qualquer posicao** da mensagem, e a recusa vem
+   de tres filtros: digito verificador invalido, numero sobrando (que em
+   mensagem de WhatsApp e quase sempre valor) ou vocabulario de gasto
+   ("paguei", "custou", "reais"). `paguei 11222333000181 no mercado` **nao** e
+   resposta; `cnpj dele e 11222333000181` e.
 3. **Classificador de intencao** (o que ja existia). `registro_despesa`,
    `consulta_resumo`, `exportar_dossie`, `conectar_banco` -> mensagem nova, a
    pendencia nao e tocada.
@@ -114,3 +117,32 @@ follow-up entra ao lado, em `metadados_ia.followups` ou
 
 Promocao nunca rebaixa, e `SEM_RELACAO` (mensagem desconexa) nao mexe no recibo
 nem fecha a pendencia.
+
+## O que acontece quando a desambiguacao erra
+
+Um caso real, que rendeu as duas correcoes atuais. Sequencia:
+`paguei 500 no dentista` -> pergunta de CNPJ anexada -> `sim` (nao e resposta,
+consome uma mensagem) -> `cnpj dele e 11.222.333/0001-81` (o CNPJ da conversa
+real era de uma clinica de verdade e foi trocado pelo sintetico aqui e nos
+testes).
+
+A terceira mensagem **era** a resposta e nao foi reconhecida: a extracao exigia
+que toda palavra da mensagem estivesse numa lista fechada de prefixos, e "dele"
+nao estava. Recusada a resposta, a mensagem seguiu a cascata e o classificador
+de intencao (Gemini, temperatura 0) devolveu `registro_despesa`. O prompt
+fiscal, tentando dar sentido a um texto que nao descreve despesa, gravou
+`valor: 0` — e o insert bateu em `recibos_valor_positivo_chk`.
+
+O estrago nao parou no recibo que nao existiu. O unico node de WhatsApp daquele
+ramo vinha **depois** do insert, entao a execucao morreu antes dele: sem
+lancamento, sem resposta, sem sinal nenhum para quem mandou a mensagem.
+
+Duas correcoes independentes, de propósito:
+
+- a extracao procura o documento em qualquer posicao da mensagem (acima), o que
+  fecha esta porta;
+- um IF `Valor Válido?` antes do insert manda o valor impossivel para uma
+  mensagem de esclarecimento no WhatsApp. Vale para qualquer caminho futuro em
+  que a IA devolva valor ausente, nulo ou zero — a lição que fica e que
+  **nenhum ramo pode ter o unico node de resposta depois de um node que pode
+  falhar**.

@@ -51,10 +51,30 @@ Deno.test("extrai o documento do jeito que a pessoa escreve", () => {
   assertEquals(extrairDocumento("aqui esta: 390.533.447-05"), CPF);
 });
 
+Deno.test("regressao: linguagem natural em volta do documento e resposta", () => {
+  // "cnpj dele e <CNPJ>" foi digitado numa conversa real e NAO foi reconhecido:
+  // a versao antiga exigia que toda palavra estivesse numa lista fechada de
+  // prefixos, e morreu em "dele". A mensagem virou despesa nova no
+  // classificador de intencao, o Gemini gravou valor 0 e o insert bateu na
+  // constraint recibos_valor_positivo_chk — nenhum recibo, nenhuma resposta.
+  //
+  // O CNPJ da conversa real foi trocado pelo sintetico de propósito: e de uma
+  // clinica de verdade.
+  assertEquals(extrairDocumento(`cnpj dele é ${CNPJ}`), CNPJ);
+  assertEquals(extrairDocumento("cnpj dele é 11.222.333/0001-81"), CNPJ);
+  assertEquals(extrairDocumento("o cnpj é 11.222.333/0001-81"), CNPJ);
+  assertEquals(extrairDocumento("cnpj da clinica: 11.222.333/0001-81"), CNPJ);
+  assertEquals(extrairDocumento("é esse aqui: 11.222.333/0001-81"), CNPJ);
+  assertEquals(extrairDocumento("achei o papel, o cnpj do dentista e 11.222.333/0001-81"), CNPJ);
+  assertEquals(extrairDocumento("o cpf da profissional e 390.533.447-05, obrigado"), CPF);
+});
+
 Deno.test("mensagem com qualquer outro conteudo NAO e resposta", () => {
   // O caso que justifica a checagem toda: isto e uma despesa nova, e trata-la
-  // como resposta faria o lancamento sumir.
+  // como resposta faria o lancamento sumir. Continua recusado depois de a
+  // extracao ficar tolerante — quem segura agora e o vocabulario de gasto.
   assertEquals(extrairDocumento("paguei 11222333000181 no mercado"), null);
+  assertEquals(extrairDocumento("paguei 123456 no mercado"), null);
   assertEquals(extrairDocumento("gastei 450 na consulta"), null);
   assertEquals(extrairDocumento("nao tenho o cnpj"), null);
   assertEquals(extrairDocumento("clinica vida"), null);
@@ -62,6 +82,26 @@ Deno.test("mensagem com qualquer outro conteudo NAO e resposta", () => {
   assertEquals(extrairDocumento(null), null);
   // Numero com a quantidade certa de digitos mas invalido tambem nao passa.
   assertEquals(extrairDocumento("11222333000182"), null);
+});
+
+Deno.test("documento valido no meio de uma despesa continua sendo despesa", () => {
+  // Os tres filtros, um por vez, com o MESMO documento valido da conversa que
+  // deve ser aceita sozinha. Sem eles a tolerancia nova roubaria lancamento.
+
+  // 1. vocabulario de gasto
+  assertEquals(extrairDocumento(`comprei material na papelaria ${CNPJ}`), null);
+  assertEquals(extrairDocumento(`consulta custou caro, cnpj ${CNPJ}`), null);
+
+  // 2. numero sobrando (quase sempre o valor)
+  assertEquals(extrairDocumento(`450 clinica ${CNPJ}`), null);
+  assertEquals(extrairDocumento(`${CNPJ} 450`), null);
+
+  // 3. simbolo de moeda, mesmo grudado no numero
+  assertEquals(extrairDocumento(`clinica ${CNPJ} R$500`), null);
+
+  // Ambiguidade tambem recusa: dois documentos validos, nenhum jeito de saber
+  // qual e o do prestador.
+  assertEquals(extrairDocumento(`cnpj ${CNPJ} cpf ${CPF}`), null);
 });
 
 Deno.test("estabelecimento nao tem resposta reconhecivel sem IA", () => {

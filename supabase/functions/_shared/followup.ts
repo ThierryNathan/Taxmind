@@ -87,28 +87,68 @@ export function extrairRespostaDeCampo(
   return extrairDocumento(texto);
 }
 
-// Prefixos que a pessoa naturalmente escreve antes do numero. Qualquer outra
-// palavra na mensagem faz a extracao recusar: "paguei 12345678000190 no
-// mercado" nao e resposta, e trata-la como tal apagaria uma despesa.
-const PREFIXOS_ACEITOS = [
-  "cnpj",
-  "cpf",
-  "e",
-  "eo",
-  "ea",
-  "o",
-  "a",
-  "seguem",
-  "segue",
-  "ta",
-  "ai",
-  "aqui",
-  "esta",
-  "numero",
-  "doc",
-  "documento",
+// Palavras que denunciam LANCAMENTO NOVO, e nao resposta. E a unica lista
+// fechada que sobrou aqui, e ela so tem termo que descreve gasto.
+//
+// A versao anterior fazia o contrario — exigia que toda palavra da mensagem
+// estivesse numa lista curta de prefixos aceitos — e isso recusava a forma como
+// a pessoa realmente escreve: "cnpj dele e 25.255.628/0001-69" morria em
+// "dele". Recusada a resposta, a mensagem seguia para o classificador de
+// intencao, que a leu como despesa nova; o resto do estrago esta em
+// docs/06 - Follow-up Conversacional.md.
+//
+// A troca de lista branca por lista negra e segura porque o peso da decisao nao
+// esta nas palavras: esta no digito verificador do documento e na regra de
+// numero sobrando logo abaixo. Uma mensagem precisa carregar um CNPJ/CPF
+// aritmeticamente valido para chegar ate aqui.
+const TERMOS_DE_LANCAMENTO = [
+  "paguei",
+  "pagamos",
+  "pagando",
+  "pagar",
+  "pago",
+  "paga",
+  "gastei",
+  "gastamos",
+  "gastou",
+  "gastar",
+  "gasto",
+  "comprei",
+  "compramos",
+  "comprou",
+  "comprar",
+  "compra",
+  "custou",
+  "custa",
+  "custo",
+  "transferi",
+  "depositei",
+  "reais",
+  "real",
+  "conto",
+  "contos",
+  "pila",
+  "valor",
+  "valores",
 ];
 
+/**
+ * Procura um CNPJ ou CPF valido em qualquer posicao da mensagem.
+ *
+ * Tres filtros, do mais forte para o mais fraco:
+ *
+ *  1. **Digito verificador.** Um numero qualquer nao passa; e isto que separa
+ *     "documento" de "sequencia de digitos".
+ *  2. **Numero sobrando.** Qualquer grupo de digitos que nao seja o documento
+ *     faz recusar. Numero solto em mensagem de WhatsApp e quase sempre valor,
+ *     e "paguei 450 na clinica 11.222.333/0001-81" tem que continuar sendo
+ *     lancamento novo.
+ *  3. **Vocabulario de gasto.** "paguei 11222333000181 no mercado" e uma
+ *     despesa escrita com o CNPJ no meio, nao uma resposta.
+ *
+ *  Documento ambiguo (dois validos na mesma mensagem) tambem recusa: o vies do
+ *  arquivo continua sendo "na duvida, e mensagem nova".
+ */
 export function extrairDocumento(texto: string | null | undefined): string | null {
   if (!texto) return null;
 
@@ -117,27 +157,49 @@ export function extrairDocumento(texto: string | null | undefined): string | nul
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
     .trim();
+  if (!semAcento) return null;
+
+  // Simbolo de moeda e prova de que a mensagem fala de dinheiro. Checado no
+  // texto cru porque "r$500" nao vira palavra separada.
+  if (/r\$/.test(semAcento)) return null;
 
   // Separadores de documento (ponto, barra, hifen) somem; o resto do texto
   // precisa sobrar limpo para a checagem de palavras.
-  const semPontuacao = semAcento.replace(/[.\-/\\:,]/g, " ").replace(/\s+/g, " ").trim();
+  const semPontuacao = semAcento.replace(/[.\-/\\:,;()]/g, " ").replace(/\s+/g, " ").trim();
   const palavras = semPontuacao.split(" ").filter(Boolean);
 
-  const digitos: string[] = [];
+  // Grupos de digitos CONSECUTIVOS formam um candidato so: "25 255 628 0001 69"
+  // e um documento com separador, nao cinco numeros soltos. Grupo separado por
+  // palavra comeca candidato novo, e e assim que o valor de uma despesa deixa
+  // de se colar ao documento.
+  const candidatos: string[] = [];
+  const sobras: string[] = [];
   const outras: string[] = [];
+
+  let corrente = "";
+  const fecharGrupo = () => {
+    if (!corrente) return;
+    if (corrente.length === 14 && cnpjValido(corrente)) candidatos.push(corrente);
+    else if (corrente.length === 11 && cpfValido(corrente)) candidatos.push(corrente);
+    else sobras.push(corrente);
+    corrente = "";
+  };
+
   for (const palavra of palavras) {
-    if (/^\d+$/.test(palavra)) digitos.push(palavra);
-    else outras.push(palavra);
+    if (/^\d+$/.test(palavra)) {
+      corrente += palavra;
+      continue;
+    }
+    fecharGrupo();
+    outras.push(palavra);
   }
+  fecharGrupo();
 
-  if (outras.some((palavra) => !PREFIXOS_ACEITOS.includes(palavra))) return null;
+  if (candidatos.length !== 1) return null;
+  if (sobras.length > 0) return null;
+  if (outras.some((palavra) => TERMOS_DE_LANCAMENTO.includes(palavra))) return null;
 
-  const numero = digitos.join("");
-  if (!numero) return null;
-
-  if (numero.length === 14 && cnpjValido(numero)) return numero;
-  if (numero.length === 11 && cpfValido(numero)) return numero;
-  return null;
+  return candidatos[0];
 }
 
 /**

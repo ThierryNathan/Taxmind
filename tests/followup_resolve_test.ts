@@ -266,6 +266,25 @@ Deno.test("documento respondido preenche o campo e promove a despesa", async () 
   assert(mensagem.includes("não é o valor que você recebe de volta"), mensagem);
 });
 
+Deno.test("resposta em linguagem natural resolve pelo patch local, sem IA", async () => {
+  // A frase (com o CNPJ trocado pelo sintetico) veio de uma conversa real em
+  // que a resposta NAO foi reconhecida: a mensagem seguiu para o classificador
+  // de intencao, virou "despesa nova", o Gemini devolveu valor 0 e o insert
+  // bateu na constraint recibos_valor_positivo_chk. Nenhum recibo, nenhuma
+  // resposta ao usuario.
+  semear();
+  const { corpo } = await resolver(comDocumento(`cnpj dele é ${CNPJ}`));
+
+  assertEquals(corpo.resolvido, true);
+  assertEquals(corpo.modo, "CAMPO_PREENCHIDO");
+  assertEquals(corpo.promovido, true);
+  // O que sustenta a promocao deterministica: nenhuma reclassificacao, nenhum
+  // risco de reescrever uma analise ja auditada.
+  assertEquals(chamadasGemini, 0);
+  assertEquals(recibo().documento_prestador, "11.222.333/0001-81");
+  assertEquals(recibo().status, "APROVADO_AUTOMATICAMENTE");
+});
+
 Deno.test("sobrando outro campo bloqueante, preenche mas nao promove", async () => {
   semear({ camposBloqueantes: ["documento_prestador", "estabelecimento"] });
   const { corpo } = await resolver(comDocumento());

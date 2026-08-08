@@ -83,6 +83,9 @@ Passo a passo em `docs/06 - Follow-up Conversacional.md`.
 - A `whatsapp-webhook` e o unico componente que ve toda mensagem (texto vai para `consulta-e-dossie`, midia para `receipt-ocr-classification`), entao o orcamento e contado la, e nao no n8n.
 - Teste de concorrencia com mock sincrono **passa sem testar nada**: a segunda execucao ja encontra a linha reivindicada no SELECT e nem chega ao UPDATE. Para exercitar a exclusao mutua de verdade, segurar o PATCH da primeira ate a segunda ter lido — ver a barreira em `tests/followup_resolve_test.ts`.
 - Fixture de reclassificacao precisa de `valor`/`data` **diferentes** dos gravados. Com os mesmos valores, um `valor: analise.valor ?? recibo.valor` passa despercebido pelo teste.
+- O reconhecimento do documento e **lista negra, nao lista branca**. Exigir que toda palavra da mensagem esteja numa lista fechada de prefixos recusa a forma como a pessoa escreve: `cnpj dele e <CNPJ>` (frase real) morria em "dele" e virava despesa nova. O que segura o falso positivo nao sao as palavras, sao o digito verificador, o numero sobrando (valor) e um punhado de termos de gasto — ver `extrairDocumento` em `_shared/followup.ts`.
+- Uma resposta de follow-up que **nao** e reconhecida nao cai em lugar nenhum inofensivo: ela segue para o classificador de intencao, que a le como `registro_despesa` (verificado no Gemini real, temperatura 0), e o prompt fiscal devolve `valor: 0` tentando dar sentido ao texto. O custo do erro de desambiguacao e maior do que "a pendencia expira".
+- Falha do insert em `recibos_evidencias` era **silencio total** para o usuario: o unico node de WhatsApp daquele ramo vinha depois do insert, entao a execucao morria antes de responder. Regra que vale para todo ramo novo: nenhum caminho pode ter o unico node de resposta depois de um node que pode falhar. Hoje ha um IF `Valor Válido?` antes do insert (`tests/n8n_valor_invalido_test.ts`).
 
 ### Gemini
 
