@@ -128,7 +128,12 @@ async function resolver(followupId: string, usuarioId: string, texto: string) {
   }
 
   if (!campoRespondivel(pendencia.campo_alvo)) {
-    await descartar(pendencia.id, "CAMPO_INVALIDO");
+    // Mesmo rotulo que a whatsapp-webhook grava para a mesma condicao. Antes
+    // eram dois nomes ("CAMPO_INVALIDO" aqui, "EXPIRADA" la) para o mesmo fato
+    // — pendencia criada com um campo que esta versao do codigo nao conhece —,
+    // e reconstruir um incidente a partir da tabela exigia adivinhar qual
+    // componente tinha escrito a linha.
+    await descartar(pendencia.id, "CAMPO_DESCONHECIDO");
     return { resolvido: false, motivo: "PENDENCIA_INDISPONIVEL" as const, mensagem: null };
   }
 

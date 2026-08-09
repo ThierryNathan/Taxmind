@@ -364,3 +364,37 @@ Deno.test("usuario sem cadastro nao ganha follow-up nenhum", async () => {
   assert(capturado.whatsapp[0]?.includes("TaxMind"));
   assertEquals(pendencia().mensagens_restantes, 2);
 });
+
+// --- CAMPO_DESCONHECIDO na trilha de auditoria ----------------------------
+
+Deno.test("campo desconhecido grava motivo proprio, nao EXPIRADA", async () => {
+  // Reproducao do incidente de 2026-08-09 (docs/09) do lado da function: a
+  // pendencia vale por mais 20 minutos e tem orcamento cheio, e mesmo assim e
+  // descartada — porque ESTA versao nao conhece o campo. Enquanto o motivo
+  // gravado era "EXPIRADA", a linha no banco contradizia os proprios
+  // expira_em e mensagens_restantes, e a investigacao comecou no lugar errado.
+  semear({ campo_alvo: "valor_reembolso_do_futuro" });
+  await enviar({ texto: "o plano cobriu 150 reais" });
+
+  assertEquals(pendencia().descartada_motivo, "CAMPO_DESCONHECIDO");
+  assert(pendencia().descartada_em !== null);
+
+  // O orcamento nao foi tocado e o prazo nao venceu: e isso que torna o rotulo
+  // "EXPIRADA" uma afirmacao falsa, e nao apenas imprecisa.
+  assertEquals(pendencia().mensagens_restantes, 2);
+  assert(new Date(pendencia().expira_em).getTime() > Date.now());
+
+  // O resto do contrato nao mudou: a mensagem segue para o n8n sem anotacao, e
+  // o follow-up continua sendo opcional.
+  assertEquals(ultimoEncaminhado().payload.followup, null);
+  assertEquals(ultimoEncaminhado().url, N8N_TEXTO);
+});
+
+Deno.test("expiracao real continua gravando EXPIRADA", async () => {
+  // O outro lado da separacao: o rotulo antigo nao pode ter sumido, senao a
+  // troca so mudou o nome do problema.
+  semear({ expira_em: new Date(Date.now() - MINUTO).toISOString() });
+  await enviar({ texto: "boa tarde" });
+
+  assertEquals(pendencia().descartada_motivo, "EXPIRADA");
+});

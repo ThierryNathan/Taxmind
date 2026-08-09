@@ -120,6 +120,19 @@ Passo a passo, numeros da varredura e decisoes em
 - A instrucao injetada no classificador de intencao **nao podia continuar fixa**: ela terminava em "NAO use esta categoria quando a mensagem trouxer o VALOR em dinheiro", e na pergunta de reembolso o valor em dinheiro e a resposta certa. Hoje `Preparar Contexto` deriva `followup_instrucao` por campo; sem pendencia os dois campos sao nulos e o prompt continua byte a byte o de antes.
 - "Na duvida marque true" foi lido pelo modelo como "toda despesa de saude e duvida": `paguei 600 no proctologista` disparava reembolso **3/3**, e como reembolso tem precedencia isso roubaria a vaga do follow-up de CNPJ na frase mais comum de despesa de saude. A correcao nao foi afrouxar o gate, foi exigir que o indicio **esteja** na mensagem ou na evidencia — ausencia de mencao a plano nao e indicio de plano. Depois: 22/22 estaveis em 5 execucoes, com 6/6 nos "convenio" fora de contexto medico (prefeitura, estagio, B2B, farmacia e restaurante conveniados).
 
+### Deploy das Edge Functions
+
+Incidente completo em `docs/09 - Incidente de Deploy Parcial.md`.
+
+- **Function cujo `index.ts` nao mudou tambem precisa de redeploy quando um modulo de `_shared` que ela importa mudou.** O bundle carrega uma copia do modulo; o diff de diretorio nao ve essa dependencia. Foi assim que a Fase 15 foi para producao pela metade: `whatsapp-webhook/index.ts` nao mudou, o `_shared/followup.ts` que ela importa mudou, e a function ficou uma versao atras — passando a descartar toda pendencia de `valor_reembolso` porque `campoRespondivel` publicado nao conhecia o campo.
+- A suite inteira testa o **repositorio**, e por isso ficou verde durante o incidente. `tests/deploy_drift_test.ts` e o unico teste que afirma algo sobre o que esta **publicado**: le o fecho transitivo de `_shared` de cada function, baixa o bundle pela Management API e compara. Sem `~/.supabase/access-token` os testes de rede sao ignorados (nao existem na CI); com token, erro de API falha de proposito.
+- O bundle guarda codigo **transpilado**, entao comparar bytes nao serve. O que sobrevive: nomes de declaracoes de topo (o Deno **nao** minifica — verificado: `montarContextoReclassificacao` esta no bundle da `whatsapp-webhook` sem ser usada por ela), literais de string e numeros de `const` de topo. Nao pega troca de operador dentro de corpo de funcao.
+- `import type` puro nao gera dependencia de bundle: o modulo e apagado na transpilacao, e cobrar a presenca dele seria falso positivo.
+- Simular "bundle antigo" **recortando** um trecho do arquivo nao funciona — os usos do simbolo mais abaixo continuam la e a busca por substring acha o nome, entao o teste passa por acidente. Remover o **token** em todas as posicoes e o que reproduz a versao antiga.
+- O corpo publicado se baixa em `GET /v1/projects/{ref}/functions/{slug}/body` (o `updated_at` de `GET .../functions` sozinho **nao** prova o conteudo: no incidente ele marcava 16:58 de um dia em que o modulo dentro do bundle era de tres commits antes).
+- O endpoint de analytics de log (`/analytics/endpoints/logs.all`) devolveu `{"result":[]}` para toda consulta, inclusive sem filtro. Isso e falta de acesso, nao ausencia de invocacao — nao serve de evidencia em nenhuma direcao.
+- Motivo de descarte de pendencia tem **quatro** valores distintos e nenhum deles pode compartilhar rotulo: `CAMPO_DESCONHECIDO` (versao publicada nao conhece o campo), `EXPIRADA` (tempo), `ORCAMENTO_ESGOTADO` (mensagens), `SUPERSEDIDA` (despesa nova tomou a vaga). Enquanto o primeiro se chamava `EXPIRADA`, a trilha afirmava pendencia expirada 30 minutos antes do proprio `expira_em` com o orcamento intacto, e a investigacao comecou no lugar errado. `descartada_motivo` e texto livre — mudar rotulo nao pede migration.
+
 ### Gemini
 
 - Modelos 3.x usam `generationConfig.thinkingConfig.thinkingLevel` (`minimal`/`low`/`medium`/`high`). O `thinkingBudget` e da geracao 2.5 e nao vale aqui.

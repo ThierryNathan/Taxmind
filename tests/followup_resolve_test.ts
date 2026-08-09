@@ -986,3 +986,22 @@ Deno.test("duas respostas concorrentes gravam o reembolso uma vez so", async () 
   assertEquals(recibo().valor_reembolsado, 120);
   assertEquals(recibo().metadados_ia.followups.length, 1);
 });
+
+Deno.test("campo desconhecido na resolucao grava o mesmo rotulo da webhook", async () => {
+  // Os dois componentes agora nomeiam a mesma condicao do mesmo jeito. Antes
+  // eram "CAMPO_INVALIDO" aqui e "EXPIRADA" la, e reconstruir um incidente pela
+  // tabela exigia adivinhar qual dos dois tinha escrito a linha.
+  semear();
+  db.followups_pendentes[0].campo_alvo = "campo_que_ainda_nao_existe";
+
+  const { corpo } = await resolver({
+    followup_id: FOLLOWUP_ID,
+    usuario_id: USUARIO_ID,
+    texto: "150 reais",
+  });
+
+  assertEquals(corpo.resolvido, false);
+  assertEquals(corpo.motivo, "PENDENCIA_INDISPONIVEL");
+  assertEquals(followup().descartada_motivo, "CAMPO_DESCONHECIDO");
+  assertEquals(chamadasGemini, 0);
+});

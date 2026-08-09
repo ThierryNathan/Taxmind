@@ -833,7 +833,7 @@ export type PendenciaFollowup = {
 
 export type DecisaoFollowup =
   | { acao: "ignorar" }
-  | { acao: "descartar"; motivo: "EXPIRADA" | "ORCAMENTO_ESGOTADO" }
+  | { acao: "descartar"; motivo: "EXPIRADA" | "ORCAMENTO_ESGOTADO" | "CAMPO_DESCONHECIDO" }
   | { acao: "anotar"; valorDetectado: string | null; mensagensRestantes: number };
 
 /**
@@ -850,7 +850,23 @@ export function decidirFollowup(
   agora: Date = new Date(),
 ): DecisaoFollowup {
   if (!pendencia) return { acao: "ignorar" };
-  if (!campoRespondivel(pendencia.campo_alvo)) return { acao: "descartar", motivo: "EXPIRADA" };
+
+  // CAMPO_DESCONHECIDO tem rotulo proprio, e a separacao custou um incidente
+  // para existir. Este ramo dispara quando a pendencia foi criada com um
+  // campo_alvo que ESTA versao do codigo nao conhece — na pratica, quando o n8n
+  // e a migration ja foram para producao e esta function nao. Enquanto ele
+  // devolvia "EXPIRADA", a trilha de auditoria afirmava uma coisa impossivel:
+  // pendencia descartada 30 minutos ANTES do proprio expira_em, com o orcamento
+  // de mensagens intacto. Os dois numeros no banco contradiziam o motivo
+  // gravado, e nada apontava para a causa real.
+  //
+  // Verificado em producao em 2026-08-09: duas pendencias de valor_reembolso
+  // (4b75abd2 e 06903763) descartadas em 9s e 34s, motivo "EXPIRADA",
+  // expira_em 30 minutos a frente. Ver docs/09.
+  if (!campoRespondivel(pendencia.campo_alvo)) {
+    return { acao: "descartar", motivo: "CAMPO_DESCONHECIDO" };
+  }
+
   if (followupExpirado(pendencia.expira_em, agora)) {
     return { acao: "descartar", motivo: "EXPIRADA" };
   }

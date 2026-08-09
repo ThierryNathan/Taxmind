@@ -354,3 +354,81 @@ Deno.test("documentoConferido so deixa passar o que fecha o digito verificador",
   assertEquals(documentoConferido(""), null);
   assertEquals(documentoConferido(12345), null);
 });
+
+// --- CAMPO_DESCONHECIDO separado de EXPIRADA ------------------------------
+//
+// Incidente de 2026-08-09 (docs/09): o n8n e a migration 010 foram para
+// producao e a whatsapp-webhook nao. Ela passou a receber pendencias com
+// campo_alvo "valor_reembolso", que a versao publicada nao conhecia, e as
+// descartou com motivo "EXPIRADA" — 30 minutos antes do proprio expira_em e com
+// o orcamento intacto. A trilha de auditoria afirmava algo impossivel, e a
+// investigacao comecou procurando bug de expiracao.
+
+Deno.test("campo que esta versao nao conhece nao e confundido com expiracao", () => {
+  const desconhecida = pendencia({ campo_alvo: "campo_que_ainda_nao_existe" });
+  const decisao = decidirFollowup(desconhecida, { tipo: "text", texto: "150 reais" });
+
+  assertEquals(decisao.acao, "descartar");
+  if (decisao.acao !== "descartar") throw new Error("tipo");
+  assertEquals(decisao.motivo, "CAMPO_DESCONHECIDO");
+});
+
+Deno.test("os tres motivos de descarte sao distinguiveis entre si", () => {
+  // O valor deste teste esta em ser exaustivo: com dois ramos devolvendo o
+  // mesmo rotulo, a tabela followups_pendentes deixa de responder "por que esta
+  // pendencia morreu", que e a unica pergunta que ela existe para responder.
+  const motivo = (p: Parameters<typeof decidirFollowup>[0], agora?: Date) => {
+    const d = decidirFollowup(p, { tipo: "text", texto: "bom dia" }, agora);
+    return d.acao === "descartar" ? d.motivo : d.acao;
+  };
+
+  assertEquals(motivo(pendencia({ campo_alvo: "categoria" })), "CAMPO_DESCONHECIDO");
+  assertEquals(
+    motivo(pendencia({ expira_em: new Date(Date.now() - MINUTO).toISOString() })),
+    "EXPIRADA",
+  );
+  assertEquals(motivo(pendencia({ mensagens_restantes: 0 })), "ORCAMENTO_ESGOTADO");
+
+  const motivos = new Set(["CAMPO_DESCONHECIDO", "EXPIRADA", "ORCAMENTO_ESGOTADO"]);
+  assertEquals(motivos.size, 3);
+});
+
+Deno.test("campo desconhecido e avaliado antes da expiracao, e nao ao contrario", () => {
+  // Pendencia com campo desconhecido E vencida: o motivo precisa ser o que
+  // realmente explica a situacao para quem for depurar. Uma pendencia de campo
+  // desconhecido que por acaso tambem venceu continua sendo, na origem, um
+  // problema de versao publicada.
+  const ambas = pendencia({
+    campo_alvo: "campo_que_ainda_nao_existe",
+    expira_em: new Date(Date.now() - MINUTO).toISOString(),
+  });
+  const decisao = decidirFollowup(ambas, { tipo: "text", texto: "150 reais" });
+
+  assertEquals(decisao.acao, "descartar");
+  if (decisao.acao !== "descartar") throw new Error("tipo");
+  assertEquals(decisao.motivo, "CAMPO_DESCONHECIDO");
+});
+
+Deno.test("o incidente real: valor_reembolso e campo conhecido nesta versao", () => {
+  // A regressao que o rotulo mascarou. Com o codigo desta versao, a pendencia
+  // 4b75abd2 do incidente e ANOTADA, e a resposta "o plano cobriu 150 reais" e
+  // reconhecida sem IA — nao descartada.
+  const doIncidente = {
+    id: "4b75abd2-9c0a-47c9-ac8a-da9ab4d7b1d5",
+    recibo_id: "c8a8dd3c-7b1b-43c2-8077-59c78033b733",
+    campo_alvo: "valor_reembolso",
+    expira_em: "2026-08-09T16:51:58.908640+00:00",
+    mensagens_restantes: 2,
+  };
+  const decisao = decidirFollowup(
+    doIncidente,
+    { tipo: "text", texto: "o plano cobriu 150 reais" },
+    new Date("2026-08-09T16:22:08.436Z"),
+  );
+
+  assertEquals(decisao.acao, "anotar");
+  if (decisao.acao !== "anotar") throw new Error("tipo");
+  assertEquals(decisao.valorDetectado, "150.00");
+  // Resposta reconhecida nao consome orcamento.
+  assertEquals(decisao.mensagensRestantes, 2);
+});
