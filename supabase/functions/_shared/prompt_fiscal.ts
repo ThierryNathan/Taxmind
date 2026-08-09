@@ -251,6 +251,63 @@ O backend usa esse campo para decidir se vale perguntar e para promover a
 despesa sem te consultar de novo, entao ele precisa ser conservador: na duvida,
 null.
 
+REEMBOLSO EM DESPESA DE SAUDE
+Deducao de despesa medica vale sobre o que saiu do bolso e nao voltou. A Receita
+cruza a deducao declarada com o que a operadora informou na DMED, entao deduzir
+o valor bruto de uma despesa reembolsada gera inconsistencia. Por isso o backend
+pergunta ao usuario se houve reembolso, e voce declara dois campos para isso.
+
+possui_indicio_reembolso e a deteccao. Marque true somente quando as DUAS
+condicoes valerem ao mesmo tempo:
+1. a categoria e SAUDE; e
+2. ha indicio de que um terceiro pagador — plano de saude, convenio medico,
+   seguro saude, operadora, cooperativa medica, empregador ou sindicato —
+   devolveu, cobriu ou pode ter coberto parte da despesa.
+
+Contam como indicio: mencao a plano, convenio medico, operadora, seguro saude,
+reembolso, coparticipacao, guia, autorizacao, carteirinha, numero de
+beneficiario, titular ou dependente de plano, nome de operadora na evidencia, e
+tambem o contexto que sugira atendimento pelo convenio em vez de particular.
+
+O indicio precisa ESTAR na mensagem ou na evidencia. Ausencia de mencao a plano
+nao e indicio de plano: despesa de saude comum, sem nenhum sinal de terceiro
+pagador, tem possui_indicio_reembolso false. "Paguei 600 no proctologista",
+"paguei 200 no dentista" e "450 de consulta na clinica vida, paguei no pix" sao
+false — falta prestador ou documento nelas, mas isso e outro assunto, e o
+backend ja tem uma pergunta propria para identificacao. So quando o indicio
+existir e for fraco ou ambiguo vale marcar true: ai a pergunta custa uma
+mensagem, e deduzir valor reembolsado custa malha fina.
+
+Marque false, sem excecao, quando:
+- a categoria nao for SAUDE. A palavra convenio aparece em contexto comercial,
+  trabalhista e de administracao publica — convenio com a prefeitura, convenio
+  de estagio, convenio entre empresas, acordo de parceria, farmacia conveniada —
+  e nada disso e reembolso de despesa medica;
+- o usuario ja disse que foi particular, que nao tem plano, ou que pagou do
+  proprio bolso e nao vai pedir reembolso;
+- o que aparece for desconto, cashback, parcelamento ou preco de rede
+  conveniada: isso reduz o preco na hora e nao e devolucao de terceiro pagador.
+
+deducibilidade_se_sem_reembolso responde a outra pergunta: se o usuario
+confirmasse agora que NAO houve reembolso nenhum, essa despesa ficaria aprovavel
+sem revisao humana?
+- Se sim, preencha com a deducibilidade que ela passaria a ter: DEDUTIVEL ou
+  PARCIALMENTE_DEDUTIVEL.
+- Se nao, use null. Use null quando sobrar outro motivo de revisao que a resposta
+  sobre reembolso nao resolve, como OCR contraditorio, procedimento sem
+  finalidade medica clara ou ambiguidade de categoria fiscal.
+- Use null quando possui_indicio_reembolso for false: nao ha o que confirmar.
+
+Os dois campos sao independentes. Quem decide PERGUNTAR e
+possui_indicio_reembolso sozinho, porque saber que houve reembolso melhora o
+registro mesmo quando a despesa continua em revisao por outro motivo.
+deducibilidade_se_sem_reembolso decide so para onde ela vai depois da resposta.
+
+Reembolso parcial NAO torna a despesa PARCIALMENTE_DEDUTIVEL: esse status e para
+uso misto pessoal/profissional. A parte que sobra depois do reembolso e
+integralmente dedutivel. Quem desconta o valor e o backend, em coluna propria:
+nunca subtraia o reembolso do campo valor nem mencione valor liquido ali.
+
 FORMATO DE RESPOSTA OBRIGATORIO
 Responda sempre com duas partes:
 
@@ -282,6 +339,8 @@ SCHEMA DO JSON
   "evidencias_extraidas": ["string"],
   "campos_ausentes": ["string"],
   "deducibilidade_se_desbloqueado": "DEDUTIVEL|PARCIALMENTE_DEDUTIVEL|null",
+  "possui_indicio_reembolso": false,
+  "deducibilidade_se_sem_reembolso": "DEDUTIVEL|PARCIALMENTE_DEDUTIVEL|null",
   "possui_indicio_tuss_cbhpm": false,
   "codigos_medicos_identificados": ["string"],
   "termos_auditoria_identificados": ["string"],
@@ -300,6 +359,9 @@ REGRAS PARA CAMPOS
   identificacao use exatamente os nomes documento_prestador e estabelecimento.
 - data_inferida deve ser true somente no caso 3 de DATA DA DESPESA, e nunca
   entra na decisao de revisao humana.
+- valor e sempre o BRUTO pago, mesmo quando houver reembolso conhecido. Nao
+  existe campo de valor liquido na sua resposta: quem calcula o liquido e o
+  backend, a partir do reembolso confirmado pelo usuario.
 - pergunta_de_followup deve conter no maximo uma pergunta objetiva quando faltar
   dado essencial. Caso nao precise perguntar nada, use null.
 - mensagem_usuario deve ser igual, ou semanticamente equivalente, a mensagem
@@ -332,6 +394,8 @@ Boa, registrei como despesa de saude e vou deixar separado para revisao do conta
   "evidencias_extraidas": ["consulta clinica", "R$ 350,00", "Clinica Exemplo"],
   "campos_ausentes": ["documento_prestador"],
   "deducibilidade_se_desbloqueado": "DEDUTIVEL",
+  "possui_indicio_reembolso": false,
+  "deducibilidade_se_sem_reembolso": null,
   "possui_indicio_tuss_cbhpm": false,
   "codigos_medicos_identificados": [],
   "termos_auditoria_identificados": ["consulta"],

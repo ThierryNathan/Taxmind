@@ -21,13 +21,26 @@ export const FOLLOWUP_TTL_MINUTOS = 30;
  *  mudou. */
 export const FOLLOWUP_MENSAGENS_TOLERADAS = 2;
 
-/** Campos estruturados e objetivamente respondiveis. Ambiguidade de categoria
- *  fiscal nao entra aqui: aquilo e decisao de contador, nao dado que falta. */
+/** Campos de IDENTIFICACAO do prestador. Ambiguidade de categoria fiscal nao
+ *  entra aqui: aquilo e decisao de contador, nao dado que falta.
+ *
+ *  A lista continua com dois elementos de proposito: derivarCamposBloqueantes
+ *  itera sobre ela procurando campo vazio EM analise[campo], e valor_reembolso
+ *  nao e um campo da extracao — e uma pergunta sobre um fato que a analise nao
+ *  tem como conhecer. Por isso ele entra como constante separada, e nao como
+ *  terceiro item aqui. */
 export const CAMPOS_FOLLOWUP = ["documento_prestador", "estabelecimento"] as const;
-export type CampoFollowup = typeof CAMPOS_FOLLOWUP[number];
+
+/** Pergunta de reembolso (Fase 15). Nao e campo da extracao: e um fato que so o
+ *  usuario sabe, e que nenhuma evidencia de compra carrega. */
+export const CAMPO_REEMBOLSO = "valor_reembolso";
+
+export type CampoFollowup = typeof CAMPOS_FOLLOWUP[number] | typeof CAMPO_REEMBOLSO;
+
+const CAMPOS_RESPONDIVEIS: readonly string[] = [...CAMPOS_FOLLOWUP, CAMPO_REEMBOLSO];
 
 export function campoRespondivel(campo: unknown): campo is CampoFollowup {
-  return typeof campo === "string" && (CAMPOS_FOLLOWUP as readonly string[]).includes(campo);
+  return typeof campo === "string" && CAMPOS_RESPONDIVEIS.includes(campo);
 }
 
 /** Para onde a despesa vai se a identificacao do prestador chegar. Unico juizo
@@ -82,6 +95,64 @@ export function derivarCamposBloqueantes(
   return CAMPOS_FOLLOWUP.filter((campo) => vazio(analise[campo])).slice(0, 1);
 }
 
+/** Para onde a despesa vai se o usuario confirmar que NAO houve reembolso.
+ *  Irmao de destinoSeDesbloqueado, e pela mesma razao: sem a declaracao, a
+ *  promocao teria que adivinhar dedutibilidade fiscal. */
+export function destinoSeSemReembolso(
+  analise: Record<string, unknown> | null | undefined,
+): string | null {
+  const declarado = analise?.deducibilidade_se_sem_reembolso;
+  return typeof declarado === "string" && ["DEDUTIVEL", "PARCIALMENTE_DEDUTIVEL"].includes(declarado)
+    ? declarado
+    : null;
+}
+
+/**
+ * Vale perguntar sobre reembolso?
+ *
+ * O gate e possui_indicio_reembolso SOZINHO — e essa e uma divergencia
+ * deliberada em relacao ao gate da pergunta de identificacao, que exige o
+ * destino declarado.
+ *
+ * A pergunta de CNPJ so servia para promover: perguntar sem poder promover era
+ * atrito puro. A pergunta de reembolso corrige o NUMERO declarado, e isso vale
+ * mesmo quando a despesa continua em revisao por outro motivo — o contador que
+ * revisa precisa saber, e a Receita cruza a deducao com a DMED da operadora.
+ * Por isso destinoSeSemReembolso nao entra aqui: ele decide so a promocao.
+ */
+export function deveperguntarReembolso(
+  analise: Record<string, unknown> | null | undefined,
+): boolean {
+  return analise?.possui_indicio_reembolso === true;
+}
+
+/**
+ * O unico campo que vai virar pergunta, entre os tres possiveis.
+ *
+ * Uma vaga so (unique parcial da migration 009), entao alguem tem que ganhar.
+ * Reembolso ganha por assimetria de risco: deduzir valor reembolsado e uma
+ * INCONSISTENCIA AFIRMATIVA contra a DMED, enquanto documento faltando e um
+ * registro INCOMPLETO que ja vai para revisao humana de qualquer jeito. Numero
+ * errado e pior do que lacuna.
+ *
+ * Na pratica os dois quase nunca disputam: o prompt manda usar
+ * deducibilidade_se_desbloqueado null quando ha indicio de reembolso, entao a
+ * derivacao de identificacao ja devolve [] nesses casos — a vaga esta vazia. A
+ * precedencia escrita aqui existe para o caso de a IA se contradizer, que foi
+ * observado na varredura (guia autorizada com indicio de reembolso E destino de
+ * desbloqueio preenchido na mesma resposta).
+ *
+ * derivarCamposBloqueantes NAO foi tocada: ela continua respondendo exatamente
+ * o que respondia ontem, e tests/n8n_campos_bloqueantes_test.ts continua sendo
+ * a prova disso.
+ */
+export function derivarCampoFollowup(
+  analise: Record<string, unknown> | null | undefined,
+): CampoFollowup | null {
+  if (deveperguntarReembolso(analise)) return CAMPO_REEMBOLSO;
+  return derivarCamposBloqueantes(analise)[0] ?? null;
+}
+
 const MS_POR_MINUTO = 60 * 1000;
 
 export function calcularExpiracaoFollowup(agora: Date = new Date()): Date {
@@ -111,6 +182,13 @@ export function perguntaParaCampo(
   campo: CampoFollowup,
   contexto: { estabelecimento?: string | null } = {},
 ): string {
+  // Pergunta fechada primeiro ("foi reembolsado?") e o valor como complemento:
+  // a resposta mais comum e "nao", e ela precisa caber em uma palavra. Dizer
+  // como responder "nao" e o que torna a negacao reconhecivel sem IA.
+  if (campo === CAMPO_REEMBOLSO) {
+    return "Para calcular a dedução certa, esse valor foi reembolsado pelo plano? " +
+      'Se foi, me diz quanto — se não foi, é só responder "não".';
+  }
   if (campo === "documento_prestador") {
     const onde = contexto.estabelecimento?.trim();
     return onde
@@ -177,8 +255,183 @@ export function extrairRespostaDeCampo(
   campo: CampoFollowup,
   texto: string | null | undefined,
 ): string | null {
+  if (campo === CAMPO_REEMBOLSO) return serializarRespostaReembolso(texto);
   if (campo !== "documento_prestador") return null;
   return extrairDocumento(texto);
+}
+
+/**
+ * Forma da resposta de reembolso no payload da whatsapp-webhook.
+ *
+ * O contrato de valor_detectado e string|null e o IF "Resposta de Follow-up?"
+ * do n8n so testa "nao vazio", entao a resposta de reembolso e serializada em
+ * string para nao mexer em nenhum dos dois. Esta string e SINAL DE ROTEAMENTO,
+ * nunca dado: quem grava e a followup-resolve, que reparseia o texto cru e tem
+ * o recibo em maos para conferir o teto do valor.
+ */
+export function serializarRespostaReembolso(texto: string | null | undefined): string | null {
+  const resposta = extrairRespostaDeReembolso(texto);
+  if (!resposta) return null;
+  if (!resposta.houve) return "NAO";
+  return resposta.valor === null ? "SIM" : resposta.valor.toFixed(2);
+}
+
+export type RespostaReembolso =
+  | { houve: false; valor: 0 }
+  | { houve: true; valor: number | null };
+
+// Verbos que denunciam DESPESA NOVA. Subconjunto proposital de
+// TERMOS_DE_LANCAMENTO: os substantivos de dinheiro daquela lista ("reais",
+// "valor", "conto") ficam de fora aqui, porque a resposta esperada NESTA
+// pergunta e justamente um valor em dinheiro — "o plano cobriu 300 reais" e a
+// resposta certa, e recusa-la por causa de "reais" seria copiar a regra do
+// campo errado. O que segura o falso positivo aqui e a exigencia de um numero
+// so, mais estes verbos.
+const VERBOS_DE_LANCAMENTO = [
+  "paguei", "pagamos", "pagando", "pagar", "gastei", "gastamos", "gastou",
+  "gastar", "gasto", "comprei", "compramos", "comprou", "comprar", "compra",
+  "custou", "custa", "custo", "transferi", "depositei",
+];
+
+// Palavras que negam o reembolso.
+const NEGACOES_REEMBOLSO = [
+  "nao", "n", "nenhum", "nenhuma", "nada", "zero", "negativo", "particular",
+  "nunca", "sem",
+];
+
+// Palavras que afirmam o reembolso sem dizer quanto.
+const AFIRMACOES_REEMBOLSO = [
+  "sim", "s", "houve", "teve", "tive", "cobriu", "cobre", "reembolsou",
+  "reembolsaram", "reembolsado", "reembolsada", "positivo", "isso", "exato",
+];
+
+// Ligacao aceita em volta de uma negacao ou de uma afirmacao seca. Lista curta
+// de proposito: palavra de fora ja e evidencia potencial e segue para a IA,
+// mesmo vies do resto do arquivo. "vou", "pedir" e "ainda" ficam FORA — "nao
+// vou pedir reembolso ainda" nao e "nao houve reembolso", e gravar 0 ali criaria
+// exatamente a inconsistencia com a DMED que esta fase existe para evitar.
+// Os verbos de afirmacao entram aqui de proposito: "nao houve reembolso" e uma
+// NEGACAO que carrega o verbo da afirmacao, e sem eles a frase mais natural de
+// negar nao seria reconhecida. E seguro porque a negacao e testada primeiro e
+// exige pelo menos uma palavra de negacao presente — "houve reembolso", sem
+// negacao nenhuma, continua caindo no ramo afirmativo.
+const LIGACAO_REEMBOLSO = [
+  "reembolso", "reembolsos", "plano", "convenio", "seguro", "operadora",
+  "cobertura", "foi", "era", "de", "do", "da", "o", "a", "e", "um", "uma",
+  "que", "eu", "meu", "minha", "no", "na", "em", "pelo", "pela", "esse",
+  "essa", "isso", "tudo", "nem", "me", "recebi", "voltou", "volta",
+  "houve", "teve", "tive", "cobriu", "cobre", "cobriram", "reembolsou",
+  "reembolsaram", "reembolsado", "reembolsada", "devolveu", "devolveram",
+];
+
+/**
+ * A mensagem responde "houve reembolso, e de quanto?".
+ *
+ * Nao existe digito verificador para valor monetario — e isso muda a natureza
+ * da guarda em relacao a extrairDocumento. O que segura o falso positivo aqui:
+ *
+ *  1. **Contexto de pendencia.** Esta funcao so roda quando a pergunta aberta e
+ *     valor_reembolso, ou seja, acabamos de perguntar isso uma ou duas
+ *     mensagens atras.
+ *  2. **Um numero so.** Dois numeros e "valor + alguma coisa", e volta a ser
+ *     mensagem nova.
+ *  3. **Verbo de gasto.** "paguei 300 no mercado" e despesa, nao resposta.
+ *  4. **Tamanho.** Numero com cara de documento (11 digitos ou mais) nao e
+ *     valor de reembolso; sem esse corte, um CPF colado viraria R$ 11 bilhoes.
+ *
+ * O teto de verdade — reembolso nao pode ser maior que a despesa — fica na
+ * followup-resolve e na constraint da migration 010, porque so eles conhecem o
+ * recibo. Aqui a resposta e so roteamento.
+ */
+export function extrairRespostaDeReembolso(
+  texto: string | null | undefined,
+): RespostaReembolso | null {
+  if (!texto) return null;
+
+  const semAcento = texto
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .trim();
+  if (!semAcento) return null;
+
+  const palavras = semAcento.replace(/[^a-z]+/g, " ").split(" ").filter(Boolean);
+
+  if (palavras.some((palavra) => VERBOS_DE_LANCAMENTO.includes(palavra))) return null;
+
+  // Valor monetario em qualquer das formas que a pessoa escreve: 300, 300,50,
+  // 1.200,00, 1200.50, R$ 300.
+  const achados = semAcento.match(/\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?|\d+(?:[.,]\d{1,2})?|\d+/g) ?? [];
+
+  if (achados.length > 1) return null;
+
+  if (achados.length === 1) {
+    const valor = valorEmReais(achados[0]);
+    if (valor === null) return null;
+    // Reembolso de zero e negacao escrita com numero.
+    return valor === 0 ? { houve: false, valor: 0 } : { houve: true, valor };
+  }
+
+  const todasConhecidas = (vocabulario: string[]) =>
+    palavras.every((palavra) =>
+      vocabulario.includes(palavra) || LIGACAO_REEMBOLSO.includes(palavra)
+    );
+
+  // Negacao antes de afirmacao: "nao houve reembolso" carrega "houve", e sem
+  // esta ordem viraria afirmacao.
+  if (palavras.some((p) => NEGACOES_REEMBOLSO.includes(p)) && todasConhecidas(NEGACOES_REEMBOLSO)) {
+    return { houve: false, valor: 0 };
+  }
+
+  if (palavras.some((p) => AFIRMACOES_REEMBOLSO.includes(p)) && todasConhecidas(AFIRMACOES_REEMBOLSO)) {
+    return { houve: true, valor: null };
+  }
+
+  return null;
+}
+
+/**
+ * Numero escrito em portugues para reais.
+ *
+ * A ambiguidade real e o ponto sozinho: "1.200" e mil e duzentos, "1.20" e um e
+ * vinte. A regra do idioma resolve — ponto seguido de exatamente tres digitos e
+ * separador de milhar.
+ */
+function valorEmReais(bruto: string): number | null {
+  let normalizado: string;
+
+  if (bruto.includes(",")) {
+    normalizado = bruto.replace(/\./g, "").replace(",", ".");
+  } else if (/\.\d{3}(?:\.\d{3})*$/.test(bruto)) {
+    normalizado = bruto.replace(/\./g, "");
+  } else {
+    normalizado = bruto;
+  }
+
+  // Documento colado (CPF tem 11, CNPJ tem 14) nao e valor de reembolso.
+  if (normalizado.replace(/\D/g, "").length >= 11) return null;
+
+  const numero = Number(normalizado);
+  if (!Number.isFinite(numero) || numero < 0) return null;
+  return numero;
+}
+
+/** Resposta a um "sim" sem valor. A pendencia continua aberta: quem confirmou o
+ *  reembolso quase sempre sabe, ou consegue ver, de quanto foi. */
+export function mensagemReembolsoSemValor(): string {
+  return [
+    "Certo — e de quanto foi esse reembolso?",
+    "Me manda só o valor que o plano devolveu, que eu desconto da dedução.",
+  ].join("\n\n");
+}
+
+/** Resposta a um valor de reembolso maior que a propria despesa. Quase sempre e
+ *  digito a mais, ou o valor da despesa repetido por engano. */
+export function mensagemReembolsoMaiorQueDespesa(valorDespesa: string): string {
+  return [
+    `Esse valor é maior que a despesa, que foi de ${valorDespesa}.`,
+    `Confere aí e me manda de novo — se o plano cobriu tudo, é só repetir ${valorDespesa}.`,
+  ].join("\n\n");
 }
 
 // Palavras que denunciam LANCAMENTO NOVO, e nao resposta. E a unica lista

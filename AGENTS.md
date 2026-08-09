@@ -74,7 +74,9 @@ Armadilhas ja encontradas na pratica. Ler antes de mexer nas areas citadas.
 
 Passo a passo em `docs/06 - Follow-up Conversacional.md`. Varredura de cenarios
 contra o Gemini real, com os bugs achados e os candidatos a melhoria futura, em
-`docs/07 - Testes Exploratorios e Variacoes.md`.
+`docs/07 - Testes Exploratorios e Variacoes.md`. O terceiro campo respondivel
+(reembolso de saude) tem secao propria mais abaixo e
+`docs/08 - Reembolso de Despesa de Saude.md`.
 
 - A despesa e gravada e confirmada **antes** de a pergunta existir. Todo caminho novo desta fase e opcional: `onError: continueRegularOutput` nos nodes de follow-up e fail open em toda consulta da `whatsapp-webhook`. Se algum dia um deles virar bloqueante, a fase perdeu o proposito.
 - A IA **nao** declara quais campos perguntar. Ela declara so o destino, em `deducibilidade_se_desbloqueado`; quem monta a lista e `derivarCamposBloqueantes` em `_shared/followup.ts`, olhando qual dos dois campos de identificacao saiu vazio da extracao. `documento_prestador` tem precedencia (unico verificavel sem IA) e a lista tem no maximo um campo — a regra fiscal de SAUDE pede prestador **ou** estabelecimento, e uma lista maior nunca esvaziaria, travando a promocao.
@@ -98,6 +100,25 @@ contra o Gemini real, com os bugs achados e os candidatos a melhoria futura, em
 - `SEM_CONTEUDO` devolve `mensagem` (a pergunta original repetida) em vez de `null`; o `WhatsApp - Enviar Ajuda` usa `$json.mensagem || <ajuda>`, entao nao houve mudanca de topologia. `SEM_RELACAO` continua caindo na ajuda generica — e `nao faco ideia` / `nao lembro` caem ali (SEM_RELACAO 3/3), o que e a mesma lacuna de UX ainda em aberto (ver `docs/07`).
 - Multiplas despesas numa mensagem sao **somadas em um recibo so**: `gastei 50 no mercado e 30 no uber` vira uma linha de R$ 80 em `OUTROS`, aprovada automaticamente. Limitacao conhecida e nao corrigida (mudanca de escopo); detalhes e mitigacao possivel em `docs/07`.
 - Falha do insert em `recibos_evidencias` era **silencio total** para o usuario: o unico node de WhatsApp daquele ramo vinha depois do insert, entao a execucao morria antes de responder. Regra que vale para todo ramo novo: nenhum caminho pode ter o unico node de resposta depois de um node que pode falhar. Hoje ha um IF `Valor Válido?` antes do insert (`tests/n8n_valor_invalido_test.ts`).
+
+### Reembolso de despesa de saude
+
+Passo a passo, numeros da varredura e decisoes em
+`docs/08 - Reembolso de Despesa de Saude.md`.
+
+- Antes desta fase o indicio de reembolso **cancelava** o follow-up em vez de disputa-lo: o prompt manda usar `deducibilidade_se_desbloqueado: null` quando ha possivel reembolso, `derivarCamposBloqueantes` devolve `[]` com destino nulo, e nenhuma pergunta era feita. A vaga unica de pendencia estava vazia justamente nos casos que a pergunta de reembolso preenche — por isso a feature e aditiva, e nao uma disputa. `docs/07` §1.6 registra o caso passando como "correto" na fase anterior.
+- O gate da pergunta e `possui_indicio_reembolso` **sozinho**, e isso diverge de proposito do gate da identificacao, que exige o destino declarado. A pergunta de CNPJ so servia para promover (perguntar sem promover e atrito puro); a de reembolso corrige o **numero declarado**, e isso vale mesmo com a despesa seguindo para revisao. `deducibilidade_se_sem_reembolso` decide so a promocao.
+- Precedencia na vaga unica: reembolso ganha, por assimetria de risco — deduzir valor reembolsado e inconsistencia **afirmativa** contra a DMED, documento faltando e registro **incompleto** que ja ia para revisao. Escrita em `derivarCampoFollowup`, que **nao** toca `derivarCamposBloqueantes`. Sem encadeamento e sem fila: faltando CNPJ e reembolso, so o reembolso e perguntado.
+- `valor` nunca vira liquido. `valor_reembolsado` entra ao lado (migration 010) e o dedutivel e derivado na leitura. Quatro motivos independentes, sendo o quarto o mais concreto: reembolso integral daria liquido 0 e violaria `recibos_valor_positivo_chk` — o modelo "liquido na coluna" nem representa o caso.
+- `NULL` e `0` sao estados diferentes na coluna, e um `default 0` apagaria a diferenca: NULL = nunca perguntado, 0 = o titular confirmou que nao houve. A distincao chega ate o dossie (`-` contra `R$ 0,00`) e tem teste dedicado nos dois lugares.
+- Reembolso parcial **nao** e `PARCIALMENTE_DEDUTIVEL`: esse status e uso misto pessoal/profissional. O que sobra depois do reembolso e integralmente dedutivel, e confundir os dois derrubaria o dedutivel duas vezes.
+- O CNPJ **nao** serve de modelo para reconhecer a resposta: ele funciona por digito verificador, e valor monetario nao tem. Tambem nao havia extracao de valor para reusar — quem extrai valor no fluxo principal e o Gemini, e o unico parsing deterministico coage um campo ja numerico. O falso positivo e segurado por contexto de pendencia + um numero so + verbo de gasto + corte de 11 digitos (documento colado). O teto contra o valor da despesa fica na `followup-resolve` e na constraint, que sao quem conhece o recibo.
+- `respostaSemConteudo` tem `nao` na lista negra — certo para a pergunta de CNPJ, onde `nao` nao carrega dado, e **errado** para a de reembolso, onde `nao` e a resposta completa. A funcao nao foi tocada: o que muda e a ordem no chamador, e uma negacao reconhecida nunca chega ate ela.
+- Os verbos de afirmacao (`houve`, `teve`, `cobriu`) precisam estar no vocabulario de ligacao da negacao, senao `nao houve reembolso` — a forma mais natural de negar — nao e reconhecida. Seguro porque a negacao e testada primeiro e exige uma palavra de negacao presente. Ja `nao vou pedir reembolso ainda` fica de fora de proposito: gravar 0 ali criaria a inconsistencia com a DMED que a fase existe para evitar.
+- O modo `REEMBOLSO_INFORMADO` **nao chama IA em caminho nenhum**, e cada teste confere `chamadasGemini === 0`. Nao e economia: o espaco de respostas e fechado, e mandar o texto ao modelo poderia promover a despesa com o reembolso em aberto.
+- Promocao exige identificacao no recibo **alem** do destino declarado. Medido: o Gemini devolve `deducibilidade_se_sem_reembolso: "DEDUTIVEL"` em despesa sem prestador nenhum (`consulta 400 reais, usei o convenio`), e sem essa checagem responder `nao` aprovaria automaticamente uma despesa de saude sem prestador.
+- A instrucao injetada no classificador de intencao **nao podia continuar fixa**: ela terminava em "NAO use esta categoria quando a mensagem trouxer o VALOR em dinheiro", e na pergunta de reembolso o valor em dinheiro e a resposta certa. Hoje `Preparar Contexto` deriva `followup_instrucao` por campo; sem pendencia os dois campos sao nulos e o prompt continua byte a byte o de antes.
+- "Na duvida marque true" foi lido pelo modelo como "toda despesa de saude e duvida": `paguei 600 no proctologista` disparava reembolso **3/3**, e como reembolso tem precedencia isso roubaria a vaga do follow-up de CNPJ na frase mais comum de despesa de saude. A correcao nao foi afrouxar o gate, foi exigir que o indicio **esteja** na mensagem ou na evidencia — ausencia de mencao a plano nao e indicio de plano. Depois: 22/22 estaveis em 5 execucoes, com 6/6 nos "convenio" fora de contexto medico (prefeitura, estagio, B2B, farmacia e restaurante conveniados).
 
 ### Gemini
 

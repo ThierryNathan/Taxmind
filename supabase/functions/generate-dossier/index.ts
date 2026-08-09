@@ -12,6 +12,10 @@ type ReciboRow = {
   descricao: string;
   categoria: string;
   valor: number | string;
+  // Null = nunca perguntado; 0 = o usuario confirmou que nao houve reembolso.
+  // A coluna valor continua sendo o BRUTO pago, que e o que a nota comprova; o
+  // liquido e derivado aqui, na leitura.
+  valor_reembolsado: number | string | null;
   deducibilidade: string;
   status: string;
 };
@@ -45,13 +49,19 @@ export const NOTA_DEDUCAO = [
   "faixa de tributacao. Nao e o valor que voce recebe de volta.",
 ];
 
-const COLUMNS = [
+// A soma das larguras e exatamente a largura util (595 - 2 * 40 = 515), e
+// tests/dossie_nota_deducao_test.ts prova isso. A coluna Reembolso entrou
+// tirando espaco das outras, e nao esticando a tabela: fitToWidth trunca o que
+// nao couber, entao Descricao encolher e degradacao aceitavel — a alternativa
+// seria a tabela vazar a margem.
+export const COLUMNS = [
   { key: "data", label: "Data", width: 55 },
-  { key: "descricao", label: "Descricao", width: 145 },
-  { key: "categoria", label: "Categoria", width: 85 },
+  { key: "descricao", label: "Descricao", width: 115 },
+  { key: "categoria", label: "Categoria", width: 75 },
   { key: "valor", label: "Valor", width: 60 },
-  { key: "deducibilidade", label: "Dedutibilidade", width: 90 },
-  { key: "status", label: "Status", width: 80 },
+  { key: "reembolso", label: "Reembolso", width: 55 },
+  { key: "deducibilidade", label: "Dedutibilidade", width: 82 },
+  { key: "status", label: "Status", width: 73 },
 ] as const;
 
 serve(async (request) => {
@@ -157,7 +167,10 @@ async function fetchUsuario(usuarioId: string) {
 async function fetchRecibos(usuarioId: string): Promise<ReciboRow[]> {
   const { data, error } = await supabase
     .from("recibos_evidencias")
-    .select("data_despesa, criado_em, descricao, categoria, valor, deducibilidade, status")
+    // Literal unico de proposito: o supabase-js infere o tipo do resultado a
+    // partir do texto do select, e concatenar com + faz a inferencia cair para
+    // GenericStringError e o cast abaixo parar de compilar.
+    .select("data_despesa, criado_em, descricao, categoria, valor, valor_reembolsado, deducibilidade, status")
     .eq("usuario_id", usuarioId)
     .order("data_despesa", { ascending: true, nullsFirst: false })
     .order("criado_em", { ascending: true });
@@ -200,6 +213,8 @@ export async function buildDossierPdf(nome: string, recibos: ReciboRow[]) {
   y = drawTableHeader(page, bold, y);
 
   let total = 0;
+  let totalReembolsado = 0;
+  let totalDedutivel = 0;
 
   for (const recibo of recibos) {
     if (y < BOTTOM_LIMIT) {
@@ -211,11 +226,28 @@ export async function buildDossierPdf(nome: string, recibos: ReciboRow[]) {
     const valor = Number(recibo.valor) || 0;
     total += valor;
 
+    // null e "nunca perguntado", e nao "zero": a diferenca aparece na coluna,
+    // porque um traco e uma lacuna que o contador pode querer preencher, e
+    // "R$ 0,00" e uma resposta que o titular ja deu.
+    const reembolsado = recibo.valor_reembolsado === null ||
+        recibo.valor_reembolsado === undefined
+      ? null
+      : Number(recibo.valor_reembolsado) || 0;
+    totalReembolsado += reembolsado ?? 0;
+
+    // Mesma regra do resumo_fiscal_usuario: so DEDUTIVEL entra, e entra pelo
+    // liquido. Somar o bruto de despesa reembolsada superestima a deducao, que
+    // e o gatilho de malha fina que o cruzamento com a DMED procura.
+    if (recibo.deducibilidade === "DEDUTIVEL") {
+      totalDedutivel += valor - (reembolsado ?? 0);
+    }
+
     const cells = [
       formatDate(recibo.data_despesa ?? recibo.criado_em),
       recibo.descricao ?? "",
       humanize(recibo.categoria),
       formatCurrency(valor),
+      reembolsado === null ? "-" : formatCurrency(reembolsado),
       humanize(recibo.deducibilidade),
       humanize(recibo.status),
     ];
@@ -224,7 +256,9 @@ export async function buildDossierPdf(nome: string, recibos: ReciboRow[]) {
     y -= 16;
   }
 
-  if (y < BOTTOM_LIMIT + 30) {
+  // O rodape cresceu com as duas linhas de reembolso; a folga precisa crescer
+  // junto, senao a ultima linha cai fora da pagina em vez de comecar outra.
+  if (y < BOTTOM_LIMIT + 62) {
     page = doc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
     y = PAGE_HEIGHT - MARGIN;
   }
@@ -244,6 +278,25 @@ export async function buildDossierPdf(nome: string, recibos: ReciboRow[]) {
     size: 11,
     font: bold,
   });
+
+  // As duas linhas so aparecem quando ha reembolso informado: sem isso, todo
+  // dossie carregaria "Total reembolsado: R$ 0,00", que sugere uma pergunta que
+  // nunca foi feita.
+  if (totalReembolsado > 0) {
+    y -= 16;
+    page.drawText(sanitize(`Total reembolsado: ${formatCurrency(totalReembolsado)}`), {
+      x: MARGIN,
+      y,
+      size: 10,
+      font,
+    });
+
+    y -= 14;
+    page.drawText(
+      sanitize(`Total dedutivel (liquido do reembolso): ${formatCurrency(totalDedutivel)}`),
+      { x: MARGIN, y, size: 10, font: bold },
+    );
+  }
 
   y -= 16;
   page.drawText(sanitize(`Lancamentos: ${recibos.length}`), {

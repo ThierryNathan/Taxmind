@@ -16,6 +16,7 @@ import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.t
 // Modulo puro, sem efeito colateral no import: pode entrar antes do stub de
 // fetch sem interferir no que a function captura.
 import {
+  CAMPO_REEMBOLSO,
   mensagemPerguntaSegueAberta,
   perguntaParaCampo,
 } from "../supabase/functions/_shared/followup.ts";
@@ -719,4 +720,269 @@ Deno.test("documento nao conferido vindo da IA nao entra no recibo", async () =>
     recibo().metadados_ia.reclassificacoes[0].analise.documento_prestador,
     "11.222.333/0001-82",
   );
+});
+
+// --- Fase 15: modo REEMBOLSO_INFORMADO ------------------------------------
+//
+// Este modo nao passa pela IA em nenhum caminho, e os testes conferem isso em
+// cada cenario (chamadasGemini === 0). Nao e detalhe de implementacao: mandar a
+// resposta para o modelo abriria a porta de promover a despesa com o reembolso
+// ainda em aberto, que e a inconsistencia com a DMED que a fase existe para
+// impedir.
+
+const PERGUNTA_REEMBOLSO = perguntaParaCampo(CAMPO_REEMBOLSO);
+
+function semearReembolso(opcoes: {
+  valor?: number;
+  deducibilidadeSeSemReembolso?: string | null;
+  estabelecimento?: string | null;
+  documento?: string | null;
+  requerRevisao?: boolean;
+  deducibilidade?: string;
+} = {}) {
+  db.followups_pendentes = [{
+    id: FOLLOWUP_ID,
+    usuario_id: USUARIO_ID,
+    recibo_id: RECIBO_ID,
+    campo_alvo: CAMPO_REEMBOLSO,
+    pergunta: PERGUNTA_REEMBOLSO,
+    mensagens_restantes: 2,
+    expira_em: new Date(Date.now() + 20 * MINUTO).toISOString(),
+    respondida_em: null,
+    resolucao: null,
+    descartada_em: null,
+    descartada_motivo: null,
+    criado_em: new Date().toISOString(),
+  }];
+
+  db.recibos_evidencias = [{
+    id: RECIBO_ID,
+    usuario_id: USUARIO_ID,
+    descricao: "Consulta com dermatologista",
+    valor: opcoes.valor ?? 400,
+    data_despesa: "2026-08-08",
+    estabelecimento: opcoes.estabelecimento === undefined ? "Clinica Vida" : opcoes.estabelecimento,
+    documento_prestador: opcoes.documento ?? null,
+    categoria: "SAUDE",
+    deducibilidade: opcoes.deducibilidade ?? "INDETERMINADO",
+    justificativa_deducibilidade: "Possivel reembolso pelo plano.",
+    confidence_score: 0.8,
+    status: "REVISAO_HUMANA",
+    requer_revisao_humana: opcoes.requerRevisao ?? true,
+    valor_reembolsado: null,
+    metadados_ia: {
+      motivos_revisao: ["Necessario confirmar ausencia de reembolso"],
+      campos_ausentes: [],
+      campos_bloqueantes: [],
+      possui_indicio_reembolso: true,
+      deducibilidade_se_desbloqueado: null,
+      deducibilidade_se_sem_reembolso: opcoes.deducibilidadeSeSemReembolso === undefined
+        ? "DEDUTIVEL"
+        : opcoes.deducibilidadeSeSemReembolso,
+    },
+  }];
+
+  respostaGemini = null;
+  chamadasGemini = 0;
+}
+
+const comReembolso = (texto: string) => ({
+  followup_id: FOLLOWUP_ID,
+  usuario_id: USUARIO_ID,
+  texto,
+});
+
+Deno.test("reembolso negado grava zero e promove a despesa", async () => {
+  semearReembolso();
+  await aguardarFunction();
+
+  const { corpo } = await resolver(comReembolso("não"));
+
+  assertEquals(corpo.resolvido, true);
+  assertEquals(corpo.modo, "REEMBOLSO_INFORMADO");
+  assertEquals(corpo.promovido, true);
+  assertEquals(chamadasGemini, 0);
+
+  // Zero e resposta, nao ausencia: e o que prova ao contador que a pergunta foi
+  // feita e respondida.
+  assertEquals(recibo().valor_reembolsado, 0);
+  assertEquals(recibo().valor, 400);
+  assertEquals(recibo().deducibilidade, "DEDUTIVEL");
+  assertEquals(recibo().requer_revisao_humana, false);
+  assertEquals(recibo().status, "APROVADO_AUTOMATICAMENTE");
+  assertEquals(followup().resolucao, "REEMBOLSO_INFORMADO");
+});
+
+Deno.test("reembolso parcial mantem o bruto e grava o abatimento ao lado", async () => {
+  semearReembolso({ valor: 400 });
+
+  const { corpo } = await resolver(comReembolso("o plano cobriu 150"));
+
+  assertEquals(corpo.resolvido, true);
+  assertEquals(chamadasGemini, 0);
+
+  // A regra que nao pode cair: valor continua sendo o bruto que a nota comprova.
+  assertEquals(recibo().valor, 400);
+  assertEquals(recibo().valor_reembolsado, 150);
+
+  // Reembolso parcial NAO e PARCIALMENTE_DEDUTIVEL: aquele status e uso misto
+  // pessoal/profissional. O liquido de 250 e integralmente dedutivel.
+  assertEquals(recibo().deducibilidade, "DEDUTIVEL");
+
+  const trilha = recibo().metadados_ia.followups[0];
+  assertEquals(trilha.modo, "REEMBOLSO_INFORMADO");
+  assertEquals(trilha.valor_bruto, 400);
+  assertEquals(trilha.valor_reembolsado, 150);
+  assertEquals(trilha.valor_liquido_dedutivel, 250);
+  assertEquals(trilha.integral, false);
+
+  // A conta aparece inteira na mensagem: esconder o bruto faria a pessoa achar
+  // que perdeu parte da despesa.
+  assert(corpo.mensagem.includes("R$ 400,00"), corpo.mensagem);
+  assert(corpo.mensagem.includes("R$ 150,00"), corpo.mensagem);
+  assert(corpo.mensagem.includes("R$ 250,00"), corpo.mensagem);
+});
+
+Deno.test("reembolso integral zera a deducao sem passar por IA", async () => {
+  semearReembolso({ valor: 300, deducibilidade: "DEDUTIVEL" });
+
+  const { corpo } = await resolver(comReembolso("300"));
+
+  assertEquals(corpo.resolvido, true);
+  assertEquals(corpo.promovido, false);
+  assertEquals(chamadasGemini, 0);
+
+  assertEquals(recibo().valor, 300);
+  assertEquals(recibo().valor_reembolsado, 300);
+  // Rebaixamento legitimo: quem afirmou que voltou tudo foi o titular, e nao
+  // sobra base de calculo. A regra de "promocao nunca rebaixa" protege contra
+  // variacao do modelo, e aqui nao ha modelo no caminho.
+  assertEquals(recibo().deducibilidade, "NAO_DEDUTIVEL");
+  assertEquals(recibo().requer_revisao_humana, false);
+  assertEquals(recibo().metadados_ia.followups[0].integral, true);
+});
+
+Deno.test("reembolso maior que a despesa nao consome a pendencia", async () => {
+  semearReembolso({ valor: 400 });
+
+  const { corpo } = await resolver(comReembolso("4000"));
+
+  assertEquals(corpo.resolvido, false);
+  assertEquals(corpo.motivo, "REEMBOLSO_MAIOR_QUE_DESPESA");
+  assert(corpo.mensagem.includes("R$ 400,00"), corpo.mensagem);
+
+  // Nada gravado e pendencia intacta: a constraint da migration 010 barraria o
+  // update, e a execucao morreria DEPOIS de reivindicar — sem resposta ao
+  // usuario e sem pendencia para tentar de novo.
+  assertEquals(recibo().valor_reembolsado, null);
+  assertEquals(followup().respondida_em, null);
+  assertEquals(followup().descartada_em, null);
+});
+
+Deno.test("sim sem valor pede o valor e deixa a pergunta de pe", async () => {
+  semearReembolso();
+
+  const { corpo } = await resolver(comReembolso("sim"));
+
+  assertEquals(corpo.resolvido, false);
+  assertEquals(corpo.motivo, "REEMBOLSO_SEM_VALOR");
+  assert(corpo.mensagem.includes("quanto"), corpo.mensagem);
+  assertEquals(chamadasGemini, 0);
+
+  assertEquals(recibo().valor_reembolsado, null);
+  assertEquals(followup().respondida_em, null);
+});
+
+Deno.test("resposta nao reconhecida repete a pergunta sem fechar nada", async () => {
+  semearReembolso();
+
+  const { corpo } = await resolver(comReembolso("o plano cobriu metade"));
+
+  assertEquals(corpo.resolvido, false);
+  assertEquals(corpo.motivo, "REEMBOLSO_NAO_RECONHECIDO");
+  assertEquals(corpo.mensagem, mensagemPerguntaSegueAberta(PERGUNTA_REEMBOLSO));
+  // Nenhuma chamada de IA: o espaco de respostas aqui e fechado, e mandar o
+  // texto ao modelo poderia promover a despesa com o reembolso em aberto.
+  assertEquals(chamadasGemini, 0);
+  assertEquals(recibo().valor_reembolsado, null);
+  assertEquals(followup().respondida_em, null);
+});
+
+Deno.test("mensagem sem conteudo cai na guarda de ontem, nao na de reembolso", async () => {
+  semearReembolso();
+
+  const { corpo } = await resolver(comReembolso("ok"));
+
+  assertEquals(corpo.resolvido, false);
+  assertEquals(corpo.motivo, "SEM_CONTEUDO");
+  assertEquals(corpo.mensagem, mensagemPerguntaSegueAberta(PERGUNTA_REEMBOLSO));
+  assertEquals(followup().respondida_em, null);
+});
+
+Deno.test("promocao exige identificacao no recibo, alem do destino declarado", async () => {
+  // Medido na varredura: o Gemini devolve deducibilidade_se_sem_reembolso
+  // "DEDUTIVEL" em despesa sem prestador nenhum ("consulta 400 reais, usei o
+  // convenio"). Sem esta checagem, responder "nao" aprovaria automaticamente
+  // uma despesa de saude sem prestador — o oposto do que o follow-up de
+  // identificacao existe para garantir.
+  semearReembolso({ estabelecimento: null, documento: null });
+
+  const { corpo } = await resolver(comReembolso("não"));
+
+  assertEquals(corpo.resolvido, true);
+  assertEquals(corpo.promovido, false);
+  assertEquals(recibo().valor_reembolsado, 0);
+  assertEquals(recibo().requer_revisao_humana, true);
+  assertEquals(recibo().status, "REVISAO_HUMANA");
+});
+
+Deno.test("sem destino declarado a despesa fica onde estava", async () => {
+  semearReembolso({ deducibilidadeSeSemReembolso: null });
+
+  const { corpo } = await resolver(comReembolso("nao houve"));
+
+  assertEquals(corpo.resolvido, true);
+  assertEquals(corpo.promovido, false);
+  assertEquals(recibo().valor_reembolsado, 0);
+  assertEquals(recibo().deducibilidade, "INDETERMINADO");
+  assertEquals(recibo().requer_revisao_humana, true);
+});
+
+Deno.test("despesa nova nao fecha a pendencia de reembolso", async () => {
+  semearReembolso();
+
+  const { corpo } = await resolver(comReembolso("paguei 300 no mercado"));
+
+  assertEquals(corpo.resolvido, false);
+  assertEquals(corpo.motivo, "REEMBOLSO_NAO_RECONHECIDO");
+  assertEquals(recibo().valor_reembolsado, null);
+  assertEquals(followup().respondida_em, null);
+});
+
+Deno.test("duas respostas concorrentes gravam o reembolso uma vez so", async () => {
+  semearReembolso({ valor: 400 });
+
+  // Mesma barreira do teste de concorrencia do documento: sem segurar o PATCH
+  // da primeira ate a segunda ter lido, a segunda ja encontra a linha
+  // reivindicada no SELECT e o UPDATE nem e exercitado.
+  segurarProximoPatch = true;
+  const segundaLeu = new Promise<void>((resolve) => {
+    leituraFeita = resolve;
+  });
+
+  const primeira = resolver(comReembolso("120"));
+  await segundaLeu;
+  leituraFeita = null;
+
+  const segunda = resolver(comReembolso("200"));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  liberarPatch?.();
+
+  const [a, b] = await Promise.all([primeira, segunda]);
+  const resolvidos = [a, b].filter((r) => r.corpo.resolvido);
+  assertEquals(resolvidos.length, 1);
+
+  // Um valor so gravado, e um registro so na trilha.
+  assertEquals(recibo().valor_reembolsado, 120);
+  assertEquals(recibo().metadados_ia.followups.length, 1);
 });

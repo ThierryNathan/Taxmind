@@ -25,16 +25,21 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import {
+  CAMPO_REEMBOLSO,
   type CampoFollowup,
   campoRespondivel,
   derivarCamposBloqueantes,
   destinoSeDesbloqueado,
+  destinoSeSemReembolso,
   documentoConferido,
   extrairRespostaDeCampo,
+  extrairRespostaDeReembolso,
   followupExpirado,
   formatarDocumento,
   mensagemDocumentoNaoConfere,
   mensagemPerguntaSegueAberta,
+  mensagemReembolsoMaiorQueDespesa,
+  mensagemReembolsoSemValor,
   montarContextoReclassificacao,
   type PendenciaFollowup,
   respostaDocumentoInvalido,
@@ -134,10 +139,210 @@ async function resolver(followupId: string, usuarioId: string, texto: string) {
     return { resolvido: false, motivo: "RECIBO_INDISPONIVEL" as const, mensagem: null };
   }
 
+  // O reembolso tem caminho proprio e 100% deterministico, sem passar pela
+  // reclassificacao por IA. Nao e economia de chamada: o espaco de respostas
+  // aqui e minusculo e fechado (nao / um valor / sim sem valor), e mandar o
+  // texto para o modelo abriria a porta que a fase inteira existe para fechar —
+  // uma analise nova poderia promover a despesa para DEDUTIVEL com o reembolso
+  // ainda em aberto, que e exatamente a inconsistencia com a DMED.
+  if (campo === CAMPO_REEMBOLSO) {
+    return await resolverReembolso(pendencia, recibo, texto);
+  }
+
   const documento = extrairRespostaDeCampo(campo, texto);
   return documento
     ? await preencherCampo(pendencia, recibo, campo, documento)
     : await reclassificar(pendencia, recibo, campo, texto);
+}
+
+// --- modo REEMBOLSO_INFORMADO --------------------------------------------
+
+async function resolverReembolso(
+  pendencia: PendenciaComDono,
+  recibo: Recibo,
+  texto: string,
+) {
+  const resposta = extrairRespostaDeReembolso(texto);
+
+  // Nao reconhecida. Duas saidas separadas so para observabilidade; as duas
+  // deixam a pendencia intacta e repetem a pergunta, que ja pede o valor.
+  // "ok" e "o plano cobriu metade" caem aqui, e nenhuma das duas pode fechar
+  // uma pendencia sem ter dito quanto.
+  if (!resposta) {
+    return {
+      resolvido: false,
+      motivo: respostaSemConteudo(texto)
+        ? ("SEM_CONTEUDO" as const)
+        : ("REEMBOLSO_NAO_RECONHECIDO" as const),
+      mensagem: mensagemPerguntaSegueAberta(pendencia.pergunta),
+    };
+  }
+
+  // "Sim" sem valor. A pergunta continua de pe, como no documento com digito
+  // errado: quem confirmou o reembolso quase sempre sabe de quanto foi.
+  if (resposta.houve && resposta.valor === null) {
+    return {
+      resolvido: false,
+      motivo: "REEMBOLSO_SEM_VALOR" as const,
+      mensagem: mensagemReembolsoSemValor(),
+    };
+  }
+
+  const valorDespesa = Number(recibo.valor);
+  const reembolso = resposta.houve ? (resposta.valor as number) : 0;
+
+  // Teto: reembolso maior que a despesa nao e reembolso. A constraint
+  // recibos_valor_reembolsado_chk barraria o insert de qualquer jeito, e a
+  // execucao morreria depois de reivindicar a pendencia — sem resposta ao
+  // usuario e sem pendencia para tentar de novo. Mesma licao do IF
+  // "Valor Válido?" do outro workflow: nada que pode falhar antes do unico node
+  // que responde.
+  if (!Number.isFinite(valorDespesa) || reembolso > valorDespesa) {
+    return {
+      resolvido: false,
+      motivo: "REEMBOLSO_MAIOR_QUE_DESPESA" as const,
+      mensagem: mensagemReembolsoMaiorQueDespesa(formatarReais(valorDespesa)),
+    };
+  }
+
+  if (!await reivindicar(pendencia.id, "REEMBOLSO_INFORMADO")) {
+    return { resolvido: false, motivo: "JA_RESOLVIDA" as const, mensagem: null };
+  }
+
+  const integral = reembolso > 0 && reembolso === valorDespesa;
+  const liquido = valorDespesa - reembolso;
+
+  // Reembolso integral rebaixa para NAO_DEDUTIVEL, e isso NAO contradiz a regra
+  // de "promocao nunca rebaixa": aquela regra protege uma classificacao
+  // auditada contra variacao do modelo, e aqui nao ha modelo nenhum no caminho.
+  // Quem afirmou que o plano devolveu tudo foi o titular, e nao sobra base de
+  // calculo para deduzir.
+  //
+  // Promocao exige identificacao no recibo, alem do destino declarado. A
+  // varredura mostrou o modelo devolvendo deducibilidade_se_sem_reembolso
+  // "DEDUTIVEL" em despesa sem prestador nenhum ("consulta 400 reais, usei o
+  // convenio"): sem esta checagem, responder "nao" aprovaria automaticamente
+  // uma despesa de saude sem prestador, que e o oposto do que o follow-up de
+  // identificacao existe para garantir.
+  const destino = destinoSeSemReembolso(recibo.metadados_ia);
+  const promover = !integral &&
+    Boolean(destino) &&
+    recibo.requer_revisao_humana &&
+    temIdentificacao(recibo);
+
+  const patch: Record<string, unknown> = {
+    // valor continua sendo o BRUTO pago, aqui como em todo o resto do
+    // follow-up. O liquido e derivado na leitura (resumo_fiscal_usuario e
+    // dossie), nunca gravado por cima da evidencia.
+    valor_reembolsado: reembolso,
+    metadados_ia: {
+      ...recibo.metadados_ia,
+      followups: [
+        ...historicoFollowups(recibo),
+        {
+          followup_id: pendencia.id,
+          campo: CAMPO_REEMBOLSO,
+          modo: "REEMBOLSO_INFORMADO",
+          houve_reembolso: resposta.houve,
+          valor_reembolsado: reembolso,
+          valor_bruto: valorDespesa,
+          valor_liquido_dedutivel: liquido,
+          integral,
+          promovido: promover,
+          deducibilidade_anterior: recibo.deducibilidade,
+          resolvido_em: new Date().toISOString(),
+        },
+      ],
+    },
+  };
+
+  if (integral) {
+    patch.deducibilidade = "NAO_DEDUTIVEL";
+    patch.requer_revisao_humana = false;
+    patch.status = "APROVADO_AUTOMATICAMENTE";
+  } else if (promover) {
+    patch.deducibilidade = destino;
+    patch.requer_revisao_humana = false;
+    patch.status = "APROVADO_AUTOMATICAMENTE";
+  }
+
+  await atualizarRecibo(recibo.id, patch);
+
+  return {
+    resolvido: true,
+    modo: "REEMBOLSO_INFORMADO" as const,
+    promovido: promover,
+    recibo_id: recibo.id,
+    mensagem: mensagemReembolso({
+      houve: resposta.houve,
+      integral,
+      promovido: promover,
+      bruto: valorDespesa,
+      reembolso,
+      liquido,
+      deducibilidade: String(patch.deducibilidade ?? recibo.deducibilidade),
+    }),
+  };
+}
+
+/**
+ * Confirmacao do reembolso, na voz do WhatsApp.
+ *
+ * Bruto, reembolso e liquido aparecem os tres quando houve desconto: o numero
+ * que muda e o dedutivel, e esconder a conta faria o usuario achar que perdeu
+ * parte da despesa. E a FRASE_DEDUCAO continua obrigatoria em toda frase que
+ * afirma dedutibilidade — reduz base de calculo, nao e dinheiro de volta.
+ */
+function mensagemReembolso(dados: {
+  houve: boolean;
+  integral: boolean;
+  promovido: boolean;
+  bruto: number;
+  reembolso: number;
+  liquido: number;
+  deducibilidade: string;
+}): string {
+  if (!dados.houve) {
+    return dados.promovido
+      ? [
+        "Anotei que não houve reembolso nessa despesa.",
+        `Com isso ela fica classificada como ${humanizar(dados.deducibilidade)}. ${FRASE_DEDUCAO}`,
+      ].join("\n\n")
+      : [
+        "Anotei que não houve reembolso nessa despesa.",
+        "Ela continua marcada para revisão do contador, mas agora com essa informação registrada.",
+      ].join("\n\n");
+  }
+
+  if (dados.integral) {
+    return [
+      `Anotei: o plano devolveu os ${formatarReais(dados.bruto)} integralmente.`,
+      "Como o valor voltou por inteiro, ele não entra na dedução — deduzir despesa reembolsada é o que a Receita cruza com a DMED do plano.",
+    ].join("\n\n");
+  }
+
+  const conta = `${formatarReais(dados.bruto)} menos ${formatarReais(dados.reembolso)} de reembolso = ` +
+    `${formatarReais(dados.liquido)} dedutíveis.`;
+
+  return dados.promovido
+    ? [`Anotei o reembolso: ${conta}`, `${FRASE_DEDUCAO}`].join("\n\n")
+    : [
+      `Anotei o reembolso: ${conta}`,
+      "Ela continua marcada para revisão do contador, mas agora com o valor certo.",
+    ].join("\n\n");
+}
+
+/** A regra fiscal de SAUDE pede identificacao do prestador OU do
+ *  estabelecimento. E fato da linha, nao juizo — por isso e conferido aqui e
+ *  nao perguntado ao modelo. */
+function temIdentificacao(recibo: Recibo): boolean {
+  const preenchido = (valor: unknown) =>
+    valor !== null && valor !== undefined && String(valor).trim() !== "";
+  return preenchido(recibo.documento_prestador) || preenchido(recibo.estabelecimento);
+}
+
+function formatarReais(valor: number): string {
+  return `R$ ${valor.toFixed(2).replace(".", ",")}`;
 }
 
 // --- modo CAMPO_PREENCHIDO -----------------------------------------------

@@ -121,3 +121,126 @@ Deno.test("o PDF gerado carrega a nota no cabecalho", async () => {
   assert(texto.includes("Consulta medica"));
   assert(texto.includes("Total geral: R$ 770,00"));
 });
+
+// --- Fase 15: reembolso no dossie -----------------------------------------
+
+const RECIBOS_COM_REEMBOLSO = [
+  {
+    data_despesa: "2026-08-01",
+    criado_em: "2026-08-01T12:00:00.000Z",
+    descricao: "Consulta com dermatologista",
+    categoria: "SAUDE",
+    valor: 400,
+    valor_reembolsado: 150,
+    deducibilidade: "DEDUTIVEL",
+    status: "APROVADO_AUTOMATICAMENTE",
+  },
+  {
+    data_despesa: "2026-08-02",
+    criado_em: "2026-08-02T12:00:00.000Z",
+    descricao: "Consulta odontologica",
+    categoria: "SAUDE",
+    valor: 250,
+    // 0 e resposta do titular: ele confirmou que nao houve reembolso.
+    valor_reembolsado: 0,
+    deducibilidade: "DEDUTIVEL",
+    status: "APROVADO_AUTOMATICAMENTE",
+  },
+  {
+    data_despesa: "2026-08-03",
+    criado_em: "2026-08-03T12:00:00.000Z",
+    descricao: "Exame de imagem",
+    categoria: "SAUDE",
+    valor: 300,
+    valor_reembolsado: 300,
+    deducibilidade: "NAO_DEDUTIVEL",
+    status: "APROVADO_AUTOMATICAMENTE",
+  },
+  {
+    data_despesa: "2026-08-04",
+    criado_em: "2026-08-04T12:00:00.000Z",
+    descricao: "Mensalidade da faculdade",
+    categoria: "EDUCACAO",
+    valor: 320,
+    // null e lacuna: a pergunta nunca foi feita nesta despesa.
+    valor_reembolsado: null,
+    deducibilidade: "DEDUTIVEL",
+    status: "RECEBIDO",
+  },
+];
+
+Deno.test("as colunas somam exatamente a largura util", async () => {
+  // A tabela nao tem quebra: se a soma passar de 515pt, a ultima coluna vaza a
+  // margem direita silenciosamente. A coluna Reembolso entrou tirando espaco
+  // das outras, e este teste e o que garante que continuou assim.
+  const { COLUMNS } = await import("../supabase/functions/generate-dossier/index.ts");
+  const soma = COLUMNS.reduce((total: number, c: { width: number }) => total + c.width, 0);
+  assertEquals(soma, LARGURA_UTIL);
+
+  const doc = await PDFDocument.create();
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  for (const coluna of COLUMNS) {
+    const largura = bold.widthOfTextAtSize(coluna.label, 9);
+    assert(
+      largura <= coluna.width,
+      `o titulo "${coluna.label}" (${largura}pt) nao cabe em ${coluna.width}pt`,
+    );
+  }
+});
+
+Deno.test("o dossie mostra bruto, reembolso e liquido sem apagar nenhum", async () => {
+  const bytes = await buildDossierPdf("Contribuinte de Teste", RECIBOS_COM_REEMBOLSO as never);
+  const texto = textoDoPdf(bytes);
+
+  // O bruto continua na linha: e ele que a nota fiscal comprova, e e sobre ele
+  // que o cruzamento da DMED acontece.
+  assert(texto.includes("R$ 400,00"), "valor bruto sumiu da linha");
+  assert(texto.includes("R$ 150,00"), "reembolso nao aparece na linha");
+
+  // Total geral e o bruto gasto: reembolso nao desfaz o desembolso.
+  assert(texto.includes("Total geral: R$ 1270,00"), texto.slice(-400));
+  assert(texto.includes("Total reembolsado: R$ 450,00"), "total reembolsado ausente");
+
+  // Dedutivel liquido: (400 - 150) + (250 - 0) + (320 - 0) = 820. O exame de
+  // 300 esta NAO_DEDUTIVEL e fica de fora, como no resumo_fiscal_usuario — e a
+  // mensalidade com valor_reembolsado null entra pelo bruto, que e o que o
+  // coalesce da RPC tambem faz.
+  assert(
+    texto.includes("Total dedutivel (liquido do reembolso): R$ 820,00"),
+    "total dedutivel liquido ausente ou errado",
+  );
+});
+
+Deno.test("despesa sem pergunta de reembolso mostra traco, nao zero", async () => {
+  // A distincao NULL x 0 chega ate o papel: traco e lacuna que o contador pode
+  // querer preencher, R$ 0,00 e resposta que o titular ja deu. Uma linha so em
+  // cada PDF, para que "R$ 0,00" so possa ter vindo da coluna de reembolso.
+  const semPergunta = textoDoPdf(
+    await buildDossierPdf("Contribuinte de Teste", [RECIBOS_COM_REEMBOLSO[3]] as never),
+  );
+  assert(semPergunta.includes("Mensalidade da faculdade"));
+  assert(
+    !semPergunta.includes("R$ 0,00"),
+    "lacuna de reembolso foi desenhada como zero: NULL e 0 viraram a mesma coisa no papel",
+  );
+  assert(!semPergunta.includes("Total reembolsado"), "rodape apareceu sem reembolso informado");
+
+  // A mesma tabela com a resposta "nao houve" precisa mostrar o zero.
+  const respondida = textoDoPdf(
+    await buildDossierPdf("Contribuinte de Teste", [RECIBOS_COM_REEMBOLSO[1]] as never),
+  );
+  assert(respondida.includes("Consulta odontologica"));
+  assert(respondida.includes("R$ 0,00"), "reembolso zero confirmado nao aparece no papel");
+});
+
+Deno.test("dossie sem reembolso nenhum continua identico ao de antes", async () => {
+  // As duas linhas novas do rodape sao condicionais de proposito: um
+  // "Total reembolsado: R$ 0,00" em todo dossie sugeriria uma pergunta que
+  // nunca foi feita.
+  const bytes = await buildDossierPdf("Contribuinte de Teste", RECIBOS as never);
+  const texto = textoDoPdf(bytes);
+
+  assert(texto.includes("Total geral: R$ 770,00"));
+  assert(!texto.includes("Total reembolsado"));
+  assert(!texto.includes("Total dedutivel"));
+});

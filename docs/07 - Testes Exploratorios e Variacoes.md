@@ -141,6 +141,14 @@ Os quatro ultimos sao a prova pratica do freio de
 e mesmo assim nenhum gerou pergunta — porque nenhuma resposta objetiva do
 usuario resolveria uso misto, farmacia generica ou reembolso.
 
+> **Revisado na Fase 15.** A ultima linha (`paguei 250 no dentista, mas foi
+> reembolsado pelo plano`) deixou de passar por "sem pergunta": o raciocinio
+> estava certo para a pergunta de *identificacao* e errado para o caso, porque
+> "houve reembolso, e de quanto?" **e** uma resposta objetiva do usuario — e a
+> mais valiosa que existe, ja que a Receita cruza a deducao com a DMED. Hoje essa
+> mensagem gera pergunta de reembolso, com gate proprio. As outras tres seguem
+> sem pergunta. Ver [[08 - Reembolso de Despesa de Saude]].
+
 ### 1.7 Risco adicionado pela varredura (fora da lista pedida)
 
 | Mensagem | Resultado | Veredito |

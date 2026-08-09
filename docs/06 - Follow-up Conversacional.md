@@ -33,8 +33,13 @@ IA:
 | Falta saber onde foi, resto ok | `DEDUTIVEL` | `["estabelecimento"]` | Sim |
 | Falta CNPJ **e** estabelecimento | `DEDUTIVEL` | `["documento_prestador"]` | Sim |
 | Uso misto pessoal/profissional | `null` | `[]` | Nao |
-| Possivel reembolso pelo plano | `null` | `[]` | Nao |
+| Possivel reembolso pelo plano | `null` | `[]` | Nao — mas ver abaixo |
 | OCR ruim, valores contraditorios | `null` | `[]` | Nao |
+
+> A linha do reembolso continua valendo **para a pergunta de identificacao**: ela
+> nao dispara ali, e e por isso que a vaga fica livre. A partir da Fase 15 esse
+> mesmo caso ganha uma pergunta propria, com gate e reconhecimento separados —
+> ver [[08 - Reembolso de Despesa de Saude]].
 
 O mesmo `deducibilidade_se_desbloqueado` diz para onde a despesa vai quando o
 campo for preenchido. Sem ele a promocao teria que adivinhar dedutibilidade
