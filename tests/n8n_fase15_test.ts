@@ -301,7 +301,18 @@ Deno.test("sem pendencia, o prompt do classificador continua o de antes", async 
   const anterior = JSON.parse(new TextDecoder().decode(stdout));
 
   const mensagem = { text_body: "me manda o resumo" };
-  assertEquals(promptDe(CONSULTA, mensagem), promptDe(anterior, mensagem));
+  // export_contador e uma adicao deliberada ao prompt base (fase do export
+  // estruturado): a linha e ignorada, e o resto do prompt continua tendo que
+  // bater byte a byte com o commitado. O que este teste protege nao e a
+  // imutabilidade do prompt, e sim que o caminho SEM pendencia nao ganhe nada
+  // do maquinario de follow-up — e isso e cobrado logo abaixo.
+  const semLinhaNova = (texto: string) =>
+    texto.split("\n").filter((l) => !l.startsWith("export_contador:")).join("\n");
+
+  assertEquals(
+    semLinhaNova(promptDe(CONSULTA, mensagem)),
+    semLinhaNova(promptDe(anterior, mensagem)),
+  );
   assert(!promptDe(CONSULTA, mensagem).includes("resposta_de_followup"));
 
   // E a mensagem que chega sem pendencia nao ganha nem contexto nem instrucao.

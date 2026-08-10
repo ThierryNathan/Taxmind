@@ -12,6 +12,10 @@ import {
   hashTextoConsentimento,
   versaoConsentimentoAceita,
 } from "../_shared/consentimento.ts";
+// Boas-vindas pelo WhatsApp assim que o cadastro conclui. O texto fica em
+// _shared porque ha uma segunda lista de capacidades no node "Sobre o TaxMind"
+// do n8n, e tests/n8n_export_contador_test.ts compara a cobertura das duas.
+import { mensagemBoasVindas } from "../_shared/boas_vindas.ts";
 
 type BootstrapRequest = {
   token: string;
@@ -92,6 +96,10 @@ serve(async (request) => {
 
     const userId = data?.user?.id ?? null;
     const consentimentoEm = new Date().toISOString();
+    // Lido ANTES do upsert: depois dele todo mundo tem onboarding_concluido
+    // true, e nao haveria mais como distinguir cadastro novo de refacao. Sem
+    // isso, quem repete o link recebe as boas-vindas de novo.
+    const jaCadastrado = userId ? await onboardingJaConcluido(userId) : false;
     if (userId) {
       await upsertUsuario({
         userId,
@@ -109,6 +117,12 @@ serve(async (request) => {
     }
 
     await recordSessionContext(tokenPayload, email, cpfHash, userId);
+
+    // Depois de tudo que persiste, e sem poder derrubar nada: a mensagem e
+    // cortesia, o cadastro e o produto. Mesma postura de registrarConsentimento.
+    if (userId && !jaCadastrado) {
+      await enviarBoasVindas(tokenPayload.phone, body.nome ?? null);
+    }
 
     return json({
       ok: true,
@@ -217,6 +231,72 @@ async function registrarConsentimento(userId: string, aceitoEm: string) {
 
   if (error) {
     console.error("failed to record consentimento lgpd", error);
+  }
+}
+
+/**
+ * O cadastro deste usuario ja estava concluido antes desta chamada?
+ *
+ * Serve so para nao repetir as boas-vindas quando a mesma pessoa refaz o
+ * onboarding com um link novo. Erro de consulta responde `true` de proposito:
+ * na duvida, calar. Mandar de novo a mensagem inteira para quem ja usa o
+ * produto e mais estranho do que nao manda-la.
+ */
+async function onboardingJaConcluido(userId: string): Promise<boolean> {
+  const { data, error } = await supabase
+    .from("usuarios")
+    .select("onboarding_concluido")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (error) {
+    console.error("failed to check onboarding state", error);
+    return true;
+  }
+
+  return data?.onboarding_concluido === true;
+}
+
+/**
+ * Boas-vindas pelo WhatsApp.
+ *
+ * Nunca lanca: o cadastro ja esta gravado quando esta funcao roda, e uma falha
+ * do Graph API nao pode virar erro de cadastro para quem acabou de se cadastrar
+ * com sucesso. Credencial ausente tambem so registra aviso — e o mesmo
+ * comportamento do sendWhatsAppText da whatsapp-webhook.
+ */
+async function enviarBoasVindas(to: string, nome: string | null) {
+  const accessToken = env("WHATSAPP_ACCESS_TOKEN");
+  const phoneNumberId = env("WHATSAPP_PHONE_NUMBER_ID");
+
+  if (!accessToken || !phoneNumberId) {
+    console.warn("WhatsApp credentials missing; skipping welcome message");
+    return;
+  }
+
+  try {
+    const response = await fetch(
+      `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          to,
+          type: "text",
+          text: { preview_url: false, body: mensagemBoasVindas(nome) },
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      console.error("failed to send welcome message", await response.text());
+    }
+  } catch (error) {
+    console.error("welcome message request failed", error);
   }
 }
 

@@ -35,6 +35,10 @@ Deno.env.set("TAXMIND_BOOTSTRAP_SECRET", "bootstrap_de_teste_com_mais_de_32_char
 Deno.env.set("CPF_HASH_PEPPER", "pepper_de_teste_com_mais_de_32_caracteres_ok");
 Deno.env.set("ONBOARDING_BASE_URL", "http://localhost:5173/onboarding");
 Deno.env.set("SUPABASE_AUTH_REDIRECT_TO", "http://localhost:5173/auth/callback");
+// Sem estas duas a function so registra um aviso e pula as boas-vindas — o que
+// esconderia justamente o que os testes de boas-vindas medem.
+Deno.env.set("WHATSAPP_ACCESS_TOKEN", "token_de_teste");
+Deno.env.set("WHATSAPP_PHONE_NUMBER_ID", "1234567890");
 
 // --- mini-PostgREST + GoTrue admin em memoria ----------------------------
 
@@ -182,6 +186,12 @@ function gotruleAdminGenerateLink(init?: RequestInit): Response {
 
 const fetchReal = globalThis.fetch;
 
+// Mensagens que a function tentou mandar pelo WhatsApp, na ordem.
+const enviosWhatsApp: Array<{ to: string; body: string }> = [];
+// Quando true, o Graph API responde 500 — para provar que a falha do envio nao
+// contamina o cadastro.
+let whatsappFalha = false;
+
 globalThis.fetch = async (input: any, init?: RequestInit): Promise<Response> => {
   const bruto = typeof input === "string" ? input : input?.url ?? String(input);
   const url = new URL(bruto);
@@ -192,6 +202,14 @@ globalThis.fetch = async (input: any, init?: RequestInit): Promise<Response> => 
       return gotruleAdminGenerateLink(init);
     }
     return postgrest(url, init);
+  }
+  if (url.origin === "https://graph.facebook.com") {
+    const corpo = JSON.parse(String(init?.body ?? "{}"));
+    enviosWhatsApp.push({ to: corpo.to, body: corpo.text?.body ?? "" });
+    if (whatsappFalha) {
+      return new Response('{"error":{"message":"boom"}}', { status: 500 });
+    }
+    return respostaJson({ messages: [{ id: "wamid.mock" }] });
   }
 
   throw new Error(`fetch inesperado no teste: ${bruto}`);
@@ -359,4 +377,66 @@ Deno.test("token expirado nao cria cadastro nem consentimento", async () => {
   assertEquals(status, 401);
   assertEquals(db.usuarios.length, 0);
   assertEquals(db.consentimentos_lgpd.length, 0);
+});
+
+// --- boas-vindas pelo WhatsApp -------------------------------------------
+//
+// O gatilho "cadastro concluido" nao existia; ele passou a ser esta function,
+// que e o unico ponto do sistema onde o cadastro conclui de fato. Ver o
+// comentario longo em _shared/boas_vindas.ts para as alternativas descartadas.
+
+Deno.test("cadastro concluido dispara as boas-vindas pelo WhatsApp", async () => {
+  resetEstado();
+  enviosWhatsApp.length = 0;
+  whatsappFalha = false;
+
+  const { status } = await cadastroCompleto();
+  assertEquals(status, 200);
+
+  assertEquals(enviosWhatsApp.length, 1, "deveria ter mandado uma mensagem");
+  // Vai para o telefone do TOKEN, e nao para um numero vindo do corpo: o corpo
+  // e do navegador, o token e assinado por nos.
+  assertEquals(enviosWhatsApp[0].to, TELEFONE);
+
+  const texto = enviosWhatsApp[0].body;
+  assert(texto.includes("Contribuinte"), "a mensagem nao usa o nome do usuario");
+  assert(texto.includes("planilha"), "a mensagem nao anuncia o export estruturado");
+  assert(texto.includes("contador"), "a mensagem nao diz para quem serve a planilha");
+  // A promessa que o resto do produto tambem se cuida para nao fazer.
+  assert(
+    texto.includes("base de cálculo"),
+    "a mensagem deixa passar a ideia de dinheiro de volta",
+  );
+});
+
+Deno.test("refazer o onboarding nao repete as boas-vindas", async () => {
+  resetEstado();
+  enviosWhatsApp.length = 0;
+  whatsappFalha = false;
+
+  assertEquals((await cadastroCompleto()).status, 200);
+  assertEquals(enviosWhatsApp.length, 1);
+
+  // Mesmo usuario, link novo: o upsert roda de novo, mas onboarding_concluido
+  // ja e true e a mensagem nao pode sair outra vez.
+  assertEquals((await cadastroCompleto()).status, 200);
+  assertEquals(enviosWhatsApp.length, 1, "as boas-vindas sairam duas vezes");
+});
+
+Deno.test("falha do WhatsApp nao derruba o cadastro", async () => {
+  resetEstado();
+  enviosWhatsApp.length = 0;
+  whatsappFalha = true;
+
+  // A mensagem e cortesia; o cadastro e o produto. Se um 500 do Graph API
+  // virasse erro de cadastro, o usuario veria "Nao deu certo" na tela com a
+  // conta ja criada — e o botao "Tentar novamente" nao teria o que consertar.
+  const { status, corpo } = await cadastroCompleto();
+  assertEquals(status, 200);
+  assertEquals(corpo.ok, true);
+  assertEquals(enviosWhatsApp.length, 1, "a tentativa de envio deveria ter acontecido");
+
+  assertEquals(db.usuarios.length, 1);
+  assertEquals(db.usuarios[0].onboarding_concluido, true);
+  assertEquals(db.consentimentos_lgpd.length, 1);
 });
