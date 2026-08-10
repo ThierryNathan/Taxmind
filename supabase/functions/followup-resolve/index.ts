@@ -18,6 +18,21 @@
 // Regra que atravessa as duas: promocao nunca rebaixa, e valor e data nunca sao
 // reescritos por texto de follow-up — a evidencia deles foi a mensagem original.
 //
+// Fase 16 — encadeamento reativo. Ate aqui os tres modos terminavam no mesmo par
+// de linhas (patch no recibo, return) e NADA reavaliava o recibo depois. Como o
+// unico componente que abre pendencia e o workflow de recibo, no insert, uma
+// despesa que precisava de duas respostas so recebia a primeira pergunta:
+//
+//   "Paguei 500 na consulta e com convenio" -> pergunta de reembolso
+//   "Nao teve reembolso"                    -> reembolso gravado, pendencia fecha
+//   "o cnpj e 11.222.333/0001-81"           -> sem pendencia aberta, o
+//       classificador de intencao le a mensagem como despesa nova (medido
+//       registro_despesa 3/3), o prompt fiscal devolve valor 0 e o usuario recebe
+//       "Nao consegui identificar o valor dessa despesa".
+//
+// Continua sendo UMA pergunta por vez — o que muda e que a seguinte nasce no
+// turno seguinte, em vez de nunca. Ver proximaPergunta() la embaixo.
+//
 // Toda a decisao vive aqui, e nao em Code node do n8n, por testabilidade:
 // tests/followup_resolve_test.ts exercita a function real com Supabase e Gemini
 // em memoria, e tests/followup_test.ts cobre a logica pura de _shared.
@@ -31,6 +46,7 @@ import {
   derivarCamposBloqueantes,
   destinoSeDesbloqueado,
   destinoSeSemReembolso,
+  deveperguntarReembolso,
   documentoConferido,
   extrairRespostaDeCampo,
   extrairRespostaDeReembolso,
@@ -42,6 +58,7 @@ import {
   mensagemReembolsoSemValor,
   montarContextoReclassificacao,
   type PendenciaFollowup,
+  perguntaParaCampo,
   respostaDocumentoInvalido,
   respostaSemConteudo,
 } from "../_shared/followup.ts";
@@ -58,6 +75,10 @@ type Recibo = {
   usuario_id: string;
   descricao: string;
   valor: number | string;
+  // NULL e 0 sao estados diferentes (migration 010): NULL = nunca perguntado,
+  // 0 = o titular confirmou que nao houve. E por isso que ele serve de guarda
+  // contra reperguntar o reembolso — ver proximaPergunta().
+  valor_reembolsado: number | string | null;
   data_despesa: string | null;
   estabelecimento: string | null;
   documento_prestador: string | null;
@@ -273,21 +294,34 @@ async function resolverReembolso(
 
   await atualizarRecibo(recibo.id, patch);
 
+  // Aqui esta a sequencia 1: reembolso respondido, mas a despesa segue em revisao
+  // porque nao ha prestador identificado (temIdentificacao acima). Ate a Fase 16
+  // a conversa morria neste ponto e o CNPJ que o usuario mandava em seguida
+  // virava tentativa de despesa nova.
+  const seguinte = await proximaPergunta(pendencia, recibo, patch);
+  const confirmacao = mensagemReembolso({
+    houve: resposta.houve,
+    integral,
+    promovido: promover,
+    bruto: valorDespesa,
+    reembolso,
+    liquido,
+    deducibilidade: String(patch.deducibilidade ?? recibo.deducibilidade),
+  });
+
   return {
     resolvido: true,
     modo: "REEMBOLSO_INFORMADO" as const,
     promovido: promover,
     recibo_id: recibo.id,
-    mensagem: mensagemReembolso({
-      houve: resposta.houve,
-      integral,
-      promovido: promover,
-      bruto: valorDespesa,
-      reembolso,
-      liquido,
-      deducibilidade: String(patch.deducibilidade ?? recibo.deducibilidade),
-    }),
+    mensagem: comPerguntaSeguinte(confirmacao, seguinte),
   };
+}
+
+/** Uma mensagem so, com a pergunta no fim. Mesma juncao que o Code node
+ *  "Montar Payload do Recibo" usa para colar a pergunta na confirmacao. */
+function comPerguntaSeguinte(mensagem: string, pergunta: string | null): string {
+  return pergunta ? `${mensagem}\n\n${pergunta}` : mensagem;
 }
 
 /**
@@ -339,11 +373,17 @@ function mensagemReembolso(dados: {
 
 /** A regra fiscal de SAUDE pede identificacao do prestador OU do
  *  estabelecimento. E fato da linha, nao juizo — por isso e conferido aqui e
- *  nao perguntado ao modelo. */
-function temIdentificacao(recibo: Recibo): boolean {
+ *  nao perguntado ao modelo.
+ *
+ *  Aceita tanto o recibo quanto a visao pos-patch de estadoAposPatch: os dois
+ *  carregam os mesmos dois campos, e a regra tem que ser a mesma nos dois usos
+ *  (decidir promocao do reembolso e decidir se ainda vale perguntar). */
+function temIdentificacao(
+  origem: { documento_prestador?: unknown; estabelecimento?: unknown },
+): boolean {
   const preenchido = (valor: unknown) =>
     valor !== null && valor !== undefined && String(valor).trim() !== "";
-  return preenchido(recibo.documento_prestador) || preenchido(recibo.estabelecimento);
+  return preenchido(origem.documento_prestador) || preenchido(origem.estabelecimento);
 }
 
 function formatarReais(valor: number): string {
@@ -401,6 +441,8 @@ async function preencherCampo(
 
   await atualizarRecibo(recibo.id, patch);
 
+  const seguinte = await proximaPergunta(pendencia, recibo, patch);
+
   const rotulo = campo === "documento_prestador" ? "documento" : "estabelecimento";
   const mensagem = promover
     ? [
@@ -417,7 +459,7 @@ async function preencherCampo(
     modo: "CAMPO_PREENCHIDO" as const,
     promovido: promover,
     recibo_id: recibo.id,
-    mensagem,
+    mensagem: comPerguntaSeguinte(mensagem, seguinte),
   };
 }
 
@@ -535,6 +577,12 @@ async function reclassificar(
 
   await atualizarRecibo(recibo.id, patch);
 
+  // Aqui esta a sequencia 2. "Foi do convenio" reclassifica, e a analise NOVA
+  // declara possui_indicio_reembolso true (medido no Gemini real: 6/6 quando o
+  // recibo ainda nao tem estabelecimento) — sinal que ate a Fase 16 era gravado
+  // na trilha e descartado, porque so a classificacao original abria pendencia.
+  const seguinte = await proximaPergunta(pendencia, recibo, patch, analise);
+
   const mensagem = promover
     ? [
       "Obrigado, isso resolve a pendência dessa despesa.",
@@ -550,7 +598,7 @@ async function reclassificar(
     modo: "RECLASSIFICADO" as const,
     promovido: promover,
     recibo_id: recibo.id,
-    mensagem,
+    mensagem: comPerguntaSeguinte(mensagem, seguinte),
   };
 }
 
@@ -620,14 +668,182 @@ async function pedirReclassificacao(
   }
 }
 
+// --- Fase 16: encadeamento reativo ----------------------------------------
+
+/**
+ * A pergunta seguinte, se o recibo recem-patchado ainda tiver campo respondivel.
+ *
+ * Devolve o TEXTO da pergunta (ja com a pendencia criada no banco) ou null.
+ * Quem chama anexa esse texto a propria confirmacao: uma mensagem so, com a
+ * pergunta no fim, exatamente como o workflow de recibo monta a dele.
+ *
+ * FAIL OPEN, e isso nao e detalhe. A resposta ao usuario ja esta pronta quando
+ * esta funcao roda, e o recibo ja foi patchado: uma falha aqui nao pode derrubar
+ * nem uma coisa nem outra. O pior caso e a segunda pergunta nao ser feita, que e
+ * exatamente o comportamento de antes desta fase.
+ */
+async function proximaPergunta(
+  pendencia: PendenciaComDono,
+  recibo: Recibo,
+  patch: Record<string, unknown>,
+  analiseNova: Record<string, unknown> | null = null,
+): Promise<string | null> {
+  try {
+    // Recibo que saiu da revisao nao tem o que desbloquear. Cobre a promocao dos
+    // tres modos e tambem o reembolso integral, que fecha em NAO_DEDUTIVEL: em
+    // nenhum dos dois casos existe pergunta que mude o desfecho, e faze-la seria
+    // atrito puro sobre uma despesa ja resolvida.
+    const requerRevisao = "requer_revisao_humana" in patch
+      ? patch.requer_revisao_humana === true
+      : recibo.requer_revisao_humana === true;
+    if (!requerRevisao) return null;
+
+    const estado = estadoAposPatch(recibo, patch, analiseNova);
+    const jaPerguntados = await camposJaPerguntados(recibo.id);
+
+    // A precedencia e a mesma de derivarCampoFollowup (reembolso primeiro, por
+    // assimetria de risco contra a DMED), mas aqui ela precisa ser uma LISTA e
+    // nao um campo so: se o reembolso ja foi perguntado, a vaga passa para a
+    // identificacao em vez de ficar vazia. E o caso da sequencia 1 inteira.
+    const candidatos: CampoFollowup[] = [];
+    if (deveperguntarReembolso(estado)) candidatos.push(CAMPO_REEMBOLSO);
+
+    // Identificacao ja satisfeita nao vira pergunta. A regra fiscal de SAUDE
+    // pede prestador OU estabelecimento, entao um CNPJ conferido fecha o
+    // requisito inteiro — e derivarCamposBloqueantes, que olha campo a campo,
+    // devolveria "estabelecimento" para um recibo que acabou de receber o
+    // documento. Num lancamento novo isso nunca aparecia (a pendencia nascia
+    // uma vez so); com encadeamento, apareceria em todo CAMPO_PREENCHIDO.
+    if (!temIdentificacao(estado)) candidatos.push(...derivarCamposBloqueantes(estado));
+
+    const proximo = candidatos.find((campo) => !jaPerguntados.has(campo));
+    if (!proximo) return null;
+
+    const pergunta = perguntaParaCampo(proximo, {
+      estabelecimento: valorAposPatch(recibo, patch, "estabelecimento") as string | null,
+    });
+
+    const { error } = await supabase.rpc("registrar_followup_pendente", {
+      p_usuario_id: recibo.usuario_id,
+      p_recibo_id: recibo.id,
+      p_sessao_whatsapp_id: pendencia.sessao_whatsapp_id,
+      p_campo_alvo: proximo,
+      p_pergunta: pergunta,
+    });
+
+    if (error) {
+      console.error("failed to chain followup", error);
+      return null;
+    }
+    return pergunta;
+  } catch (error) {
+    console.error("failed to chain followup", error);
+    return null;
+  }
+}
+
+/**
+ * O recibo como ele ficou, na forma que as derivacoes entendem.
+ *
+ * Duas correcoes sobre "ler metadados_ia cru", e as duas sao o motivo de esta
+ * funcao existir:
+ *
+ * 1. Os campos de identificacao vem das COLUNAS pos-patch, nao da analise
+ *    gravada. metadados_ia guarda a extracao original e continua com o documento
+ *    vazio depois de um CAMPO_PREENCHIDO — reperguntar o que acabou de ser
+ *    respondido seria o resultado direto de ler dali.
+ *
+ * 2. Depois de o reembolso ser respondido, quem governa "identificar o prestador
+ *    desbloqueia?" passa a ser deducibilidade_se_sem_reembolso. O prompt manda
+ *    declarar deducibilidade_se_desbloqueado NULL justamente quando ha indicio de
+ *    reembolso (medido no Gemini real: 3/3 em "Paguei 500 na consulta e com
+ *    convenio"), e derivarCamposBloqueantes faz gate nesse campo. Sem esta
+ *    promocao do destino residual, a reavaliacao devolveria lista vazia e a
+ *    sequencia 1 continuaria sem nunca pedir o CNPJ — o bug que esta fase existe
+ *    para corrigir.
+ *
+ * A analise original NAO e reescrita: isto e uma visao derivada, montada na hora
+ * e jogada fora em seguida.
+ */
+function estadoAposPatch(
+  recibo: Recibo,
+  patch: Record<string, unknown>,
+  analiseNova: Record<string, unknown> | null,
+): Record<string, unknown> {
+  // Na reclassificacao o juizo mais recente e o da analise nova; nos outros dois
+  // modos nao houve analise nova, e o que vale continua sendo a original.
+  const declaracoes = analiseNova ?? recibo.metadados_ia ?? {};
+
+  return {
+    ...declaracoes,
+    documento_prestador: valorAposPatch(recibo, patch, "documento_prestador"),
+    estabelecimento: valorAposPatch(recibo, patch, "estabelecimento"),
+    possui_indicio_reembolso: reembolsoRespondido(recibo, patch)
+      ? false
+      : declaracoes.possui_indicio_reembolso,
+    deducibilidade_se_desbloqueado: destinoSeDesbloqueado(declaracoes) ??
+      (reembolsoRespondido(recibo, patch) ? destinoSeSemReembolso(declaracoes) : null),
+  };
+}
+
+/** NULL = nunca perguntado; qualquer numero (inclusive 0) = respondido. E a
+ *  distincao que a migration 010 preserva de proposito, e ela e o sinal
+ *  principal contra repetir a pergunta de reembolso. */
+function reembolsoRespondido(recibo: Recibo, patch: Record<string, unknown>): boolean {
+  const valor = valorAposPatch(recibo, patch, "valor_reembolsado");
+  return valor !== null && valor !== undefined;
+}
+
+function valorAposPatch(recibo: Recibo, patch: Record<string, unknown>, coluna: string): unknown {
+  return coluna in patch ? patch[coluna] : (recibo as unknown as Record<string, unknown>)[coluna];
+}
+
+/**
+ * Campos que ja foram perguntados neste recibo, com qualquer desfecho.
+ *
+ * Perguntado e perguntado: uma pendencia respondida, descartada ou fechada sem o
+ * dado nao volta a fila. Sem isto, uma reclassificacao que nao preencheu o
+ * documento reabriria a MESMA pergunta que acabou de fechar, e a resposta
+ * seguinte reabriria de novo — laco limitado so pelo TTL e pelo orcamento de
+ * mensagens. E o que torna verdadeira a invariante de que a cadeia tem no maximo
+ * dois passos: sao dois campos possiveis, e cada um sai da fila ao ser feito.
+ */
+async function camposJaPerguntados(reciboId: string): Promise<Set<string>> {
+  const { data, error } = await supabase
+    .from("followups_pendentes")
+    .select("campo_alvo")
+    .eq("recibo_id", reciboId);
+
+  if (error) {
+    // Fail closed SO nesta consulta, e de proposito: sem saber o que ja foi
+    // perguntado, o risco e repetir a pergunta em laco. Nao perguntar e o
+    // comportamento de antes desta fase; repetir seria pior do que ela.
+    console.error("failed to load followup history", error);
+    throw new Error("followup_history_unavailable");
+  }
+
+  return new Set((data ?? []).map((linha) => String(linha.campo_alvo)));
+}
+
 // --- acesso a dados -------------------------------------------------------
 
-type PendenciaComDono = PendenciaFollowup & { usuario_id: string; pergunta: string };
+// sessao_whatsapp_id e carregado so para ser repassado a pendencia encadeada.
+// A coluna e write-only no projeto inteiro (ninguem le), mas herdar o valor
+// mantem a trilha coerente de graca — a alternativa seria gravar null numa
+// pendencia que nasceu da mesma conversa.
+type PendenciaComDono = PendenciaFollowup & {
+  usuario_id: string;
+  pergunta: string;
+  sessao_whatsapp_id: string | null;
+};
 
 async function buscarPendencia(followupId: string): Promise<PendenciaComDono | null> {
   const { data, error } = await supabase
     .from("followups_pendentes")
-    .select("id, usuario_id, recibo_id, campo_alvo, pergunta, expira_em, mensagens_restantes")
+    .select(
+      "id, usuario_id, recibo_id, sessao_whatsapp_id, campo_alvo, pergunta, expira_em, " +
+        "mensagens_restantes",
+    )
     .eq("id", followupId)
     .is("respondida_em", null)
     .is("descartada_em", null)
@@ -679,9 +895,9 @@ async function buscarRecibo(reciboId: string): Promise<Recibo | null> {
   const { data, error } = await supabase
     .from("recibos_evidencias")
     .select(
-      "id, usuario_id, descricao, valor, data_despesa, estabelecimento, documento_prestador, " +
-        "categoria, deducibilidade, justificativa_deducibilidade, confidence_score, status, " +
-        "requer_revisao_humana, metadados_ia",
+      "id, usuario_id, descricao, valor, valor_reembolsado, data_despesa, estabelecimento, " +
+        "documento_prestador, categoria, deducibilidade, justificativa_deducibilidade, " +
+        "confidence_score, status, requer_revisao_humana, metadados_ia",
     )
     .eq("id", reciboId)
     .maybeSingle();
@@ -734,9 +950,28 @@ function historicoReclassificacoes(recibo: Recibo): unknown[] {
  * original. Sem esse campo a promocao teria que adivinhar, e adivinhar aqui
  * significa afirmar dedutibilidade fiscal que ninguem analisou — entao o
  * fallback e manter o que ja estava.
+ *
+ * O destino residual (Fase 16) e a mesma regra de estadoAposPatch, e ela precisa
+ * valer nos DOIS lugares: quando o reembolso ja foi respondido, o prompt tinha
+ * anulado deducibilidade_se_desbloqueado e quem responde "identificar o prestador
+ * desbloqueia para onde?" e deducibilidade_se_sem_reembolso. Sem isto, o CNPJ
+ * encadeado da sequencia 1 promoveria o recibo para APROVADO_AUTOMATICAMENTE
+ * mantendo INDETERMINADO — uma despesa que nao chega ao contador e tambem nao
+ * conta como dedutivel.
+ *
+ * Este caminho so e alcancavel via encadeamento: antes da Fase 16 nao existia
+ * recibo com valor_reembolsado preenchido E pendencia de identificacao aberta,
+ * porque a unica pendencia nascia no insert e era uma so.
  */
 function promoverDeducibilidade(recibo: Recibo): string {
-  return destinoSeDesbloqueado(recibo.metadados_ia) ?? recibo.deducibilidade;
+  const declarado = destinoSeDesbloqueado(recibo.metadados_ia);
+  if (declarado) return declarado;
+
+  const residual = recibo.valor_reembolsado !== null && recibo.valor_reembolsado !== undefined
+    ? destinoSeSemReembolso(recibo.metadados_ia)
+    : null;
+
+  return residual ?? recibo.deducibilidade;
 }
 
 function motivoRestante(recibo: Recibo): string {

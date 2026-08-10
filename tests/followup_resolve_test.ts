@@ -29,6 +29,7 @@ const USUARIO_ID = "11111111-1111-4111-8111-111111111111";
 const OUTRO_USUARIO = "99999999-9999-4999-8999-999999999999";
 const RECIBO_ID = "22222222-2222-4222-8222-222222222222";
 const FOLLOWUP_ID = "33333333-3333-4333-8333-333333333333";
+const SESSAO_ID = "55555555-5555-4555-8555-555555555555";
 
 const CNPJ = "11222333000181";
 const MINUTO = 60 * 1000;
@@ -90,7 +91,58 @@ let segurarProximoPatch = false;
 let liberarPatch: (() => void) | null = null;
 let leituraFeita: (() => void) | null = null;
 
+/**
+ * Espelho de registrar_followup_pendente (migration 009).
+ *
+ * Sem isto o encadeamento da Fase 16 nao e testavel: a chamada estoura no mock,
+ * cai no fail-open de proximaPergunta e a suite passa sem exercitar nada — foi
+ * exatamente o que aconteceu na primeira execucao depois da implementacao.
+ *
+ * Reproduz as duas operacoes da funcao SQL na ordem dela: encerrar a pendencia
+ * aberta do usuario como SUPERSEDIDA e inserir a nova. A ordem importa para o
+ * teste ter alguma chance de pegar violacao da unique parcial
+ * idx_followups_pendentes_aberto_por_usuario, conferida em pendenciaAberta().
+ */
+let sequenciaEncadeada = 0;
+let falharRpc = false;
+
+function rpcRegistrarFollowupPendente(corpo: Record<string, any>): string {
+  for (const linha of db.followups_pendentes) {
+    if (
+      linha.usuario_id === corpo.p_usuario_id && !linha.respondida_em && !linha.descartada_em
+    ) {
+      linha.descartada_em = new Date().toISOString();
+      linha.descartada_motivo = "SUPERSEDIDA";
+    }
+  }
+
+  sequenciaEncadeada += 1;
+  const id = `44444444-4444-4444-8444-${String(sequenciaEncadeada).padStart(12, "0")}`;
+  db.followups_pendentes.push({
+    id,
+    usuario_id: corpo.p_usuario_id,
+    recibo_id: corpo.p_recibo_id,
+    sessao_whatsapp_id: corpo.p_sessao_whatsapp_id ?? null,
+    campo_alvo: corpo.p_campo_alvo,
+    pergunta: corpo.p_pergunta,
+    mensagens_restantes: corpo.p_mensagens ?? 2,
+    expira_em: new Date(Date.now() + (corpo.p_ttl_minutos ?? 30) * MINUTO).toISOString(),
+    respondida_em: null,
+    resolucao: null,
+    descartada_em: null,
+    descartada_motivo: null,
+    criado_em: new Date().toISOString(),
+  });
+  return id;
+}
+
 async function postgrest(url: URL, init?: RequestInit): Promise<Response> {
+  if (url.pathname === "/rest/v1/rpc/registrar_followup_pendente") {
+    if (falharRpc) return respostaJson({ code: "42501", message: "permission denied" }, 403);
+    const corpo = JSON.parse(String(init?.body ?? "{}"));
+    return respostaJson(rpcRegistrarFollowupPendente(corpo));
+  }
+
   const tabela = url.pathname.replace("/rest/v1/", "");
   if (!(tabela in db)) throw new Error(`tabela inesperada no teste: ${tabela}`);
 
@@ -174,6 +226,7 @@ function semear(opcoes: {
     id: FOLLOWUP_ID,
     usuario_id: USUARIO_ID,
     recibo_id: RECIBO_ID,
+    sessao_whatsapp_id: SESSAO_ID,
     campo_alvo: "documento_prestador",
     pergunta: PERGUNTA,
     mensagens_restantes: 2,
@@ -190,6 +243,7 @@ function semear(opcoes: {
     usuario_id: USUARIO_ID,
     descricao: "Consulta medica",
     valor: 450,
+    valor_reembolsado: null,
     data_despesa: "2026-08-08",
     estabelecimento: "Clinica Vida",
     documento_prestador: null,
@@ -216,6 +270,20 @@ function semear(opcoes: {
 
 const recibo = () => db.recibos_evidencias[0];
 const followup = () => db.followups_pendentes[0];
+
+/**
+ * A pendencia aberta, com a unique parcial conferida no caminho.
+ *
+ * idx_followups_pendentes_aberto_por_usuario garante no maximo uma por usuario,
+ * e o encadeamento e o primeiro codigo que cria pendencia FORA do insert de
+ * recibo — se ele algum dia abrir a segunda sem encerrar a primeira, o mock em
+ * memoria aceitaria em silencio e o estouro so apareceria em producao.
+ */
+function pendenciaAberta() {
+  const abertas = db.followups_pendentes.filter((f) => !f.respondida_em && !f.descartada_em);
+  assert(abertas.length <= 1, `mais de uma pendencia aberta: ${JSON.stringify(abertas)}`);
+  return abertas[0] ?? null;
+}
 
 async function resolver(corpo: Record<string, unknown>, token = SERVICE_ROLE) {
   const resposta = await fetchReal(FUNCTION_ORIGIN, {
@@ -744,6 +812,7 @@ function semearReembolso(opcoes: {
     id: FOLLOWUP_ID,
     usuario_id: USUARIO_ID,
     recibo_id: RECIBO_ID,
+    sessao_whatsapp_id: SESSAO_ID,
     campo_alvo: CAMPO_REEMBOLSO,
     pergunta: PERGUNTA_REEMBOLSO,
     mensagens_restantes: 2,
@@ -986,6 +1055,385 @@ Deno.test("duas respostas concorrentes gravam o reembolso uma vez so", async () 
   assertEquals(recibo().valor_reembolsado, 120);
   assertEquals(recibo().metadados_ia.followups.length, 1);
 });
+
+// --- Fase 16: encadeamento reativo ----------------------------------------
+//
+// Teste de aceite das DUAS sequencias reais de WhatsApp que abriram a fase. Os
+// numeros de cada analise foram medidos contra o Gemini de producao antes de
+// qualquer codigo ser escrito, e estao anotados em cada fixture: o que se testa
+// aqui e a decisao da function sobre aquela analise, nao a redacao do modelo.
+
+const PERGUNTA_CNPJ_SEM_LUGAR = perguntaParaCampo("documento_prestador");
+
+/**
+ * Sequencia 1, passo 1 — "Paguei 500 na consulta e com convenio".
+ *
+ * Medido 3/3 no Gemini real. Os dois campos que importam:
+ *   possui_indicio_reembolso: true  -> a vaga vai para a pergunta de reembolso
+ *   deducibilidade_se_desbloqueado: null -> o prompt manda anular quando ha
+ *     indicio de reembolso, e e por isso que a reavaliacao precisa do destino
+ *     RESIDUAL (deducibilidade_se_sem_reembolso). Lendo o campo cru, a
+ *     derivacao devolveria [] e a sequencia 1 continuaria quebrada.
+ */
+function semearSequencia1() {
+  db.followups_pendentes = [{
+    id: FOLLOWUP_ID,
+    usuario_id: USUARIO_ID,
+    recibo_id: RECIBO_ID,
+    sessao_whatsapp_id: SESSAO_ID,
+    campo_alvo: CAMPO_REEMBOLSO,
+    pergunta: PERGUNTA_REEMBOLSO,
+    mensagens_restantes: 2,
+    expira_em: new Date(Date.now() + 20 * MINUTO).toISOString(),
+    respondida_em: null,
+    resolucao: null,
+    descartada_em: null,
+    descartada_motivo: null,
+    criado_em: new Date().toISOString(),
+  }];
+
+  db.recibos_evidencias = [{
+    id: RECIBO_ID,
+    usuario_id: USUARIO_ID,
+    descricao: "Consulta medica",
+    valor: 500,
+    valor_reembolsado: null,
+    data_despesa: "2026-08-10",
+    estabelecimento: null,
+    documento_prestador: null,
+    categoria: "SAUDE",
+    deducibilidade: "INDETERMINADO",
+    justificativa_deducibilidade: "Possivel reembolso pelo convenio.",
+    confidence_score: 0.8,
+    status: "REVISAO_HUMANA",
+    requer_revisao_humana: true,
+    metadados_ia: {
+      motivos_revisao: ["Indicio de reembolso pelo convenio", "Falta identificacao do prestador"],
+      campos_ausentes: ["documento_prestador"],
+      campos_bloqueantes: [],
+      possui_indicio_reembolso: true,
+      deducibilidade_se_desbloqueado: null,
+      deducibilidade_se_sem_reembolso: "DEDUTIVEL",
+    },
+  }];
+
+  respostaGemini = null;
+  chamadasGemini = 0;
+}
+
+Deno.test("ACEITE seq1: reembolso respondido encadeia a pergunta do CNPJ", async () => {
+  semearSequencia1();
+  await aguardarFunction();
+
+  // Passo 2 do transcript: "Não teve reembolso".
+  const passo2 = await resolver(comReembolso("Não teve reembolso"));
+
+  assertEquals(passo2.corpo.resolvido, true);
+  assertEquals(passo2.corpo.modo, "REEMBOLSO_INFORMADO");
+  // Sem identificacao no recibo a promocao continua barrada, como antes.
+  assertEquals(passo2.corpo.promovido, false);
+  assertEquals(recibo().valor_reembolsado, 0);
+  assertEquals(recibo().status, "REVISAO_HUMANA");
+  // O modo de reembolso nao chama IA em caminho nenhum, e o encadeamento nao
+  // podia mudar isso: a pergunta seguinte e derivada, nao redigida pelo modelo.
+  assertEquals(chamadasGemini, 0);
+
+  // O que a fase adiciona: a pergunta seguinte existe.
+  const aberta = pendenciaAberta();
+  assert(aberta, "nenhuma pendencia encadeada foi aberta");
+  assertEquals(aberta.campo_alvo, "documento_prestador");
+  assertEquals(aberta.recibo_id, RECIBO_ID);
+  // Herdada da pendencia que acabou de resolver (ponto 6 do desenho).
+  assertEquals(aberta.sessao_whatsapp_id, SESSAO_ID);
+  // Orcamento e TTL novos: a pergunta e nova, e o relogio da anterior ja correu.
+  assertEquals(aberta.mensagens_restantes, 2);
+
+  // Uma mensagem so, com a pergunta colada no fim.
+  const mensagem: string = passo2.corpo.mensagem;
+  assert(mensagem.startsWith("Anotei que não houve reembolso"), mensagem);
+  assert(mensagem.endsWith(PERGUNTA_CNPJ_SEM_LUGAR), mensagem);
+
+  // Passo 3 do transcript: o CNPJ que antes virava "não consegui identificar o
+  // valor dessa despesa". Agora ha pendencia aberta para ele responder.
+  const passo3 = await resolver({
+    followup_id: aberta.id,
+    usuario_id: USUARIO_ID,
+    texto: `o cnpj é ${CNPJ}`,
+  });
+
+  assertEquals(passo3.corpo.resolvido, true);
+  assertEquals(passo3.corpo.modo, "CAMPO_PREENCHIDO");
+  assertEquals(passo3.corpo.promovido, true);
+  assertEquals(recibo().documento_prestador, "11.222.333/0001-81");
+  assertEquals(recibo().status, "APROVADO_AUTOMATICAMENTE");
+
+  // O destino residual em acao. Sem ele a promocao cairia no fallback "mantem o
+  // que estava" e a despesa terminaria APROVADO_AUTOMATICAMENTE com
+  // INDETERMINADO — nem chega ao contador, nem conta como dedutivel.
+  assertEquals(recibo().deducibilidade, "DEDUTIVEL");
+
+  // As invariantes de sempre continuam de pe.
+  assertEquals(Number(recibo().valor), 500);
+  assertEquals(recibo().valor_reembolsado, 0);
+  assertEquals(recibo().data_despesa, "2026-08-10");
+
+  // A cadeia termina: nao ha terceiro campo, e nada reabre os dois ja feitos.
+  assertEquals(pendenciaAberta(), null);
+});
+
+/**
+ * Sequencia 2, passo 1 — "Paguei 799 no dentista".
+ *
+ * estabelecimento NULL de proposito, e nao pela media das execucoes: medido
+ * 1/3 no passo 1, e e o UNICO ramo em que o passo 2 reproduz o bug relatado.
+ * Com estabelecimento preenchido, "Foi do convenio" volta SEM_RELACAO 6/6 e a
+ * pendencia nem chega a fechar. Testar a media esconderia o caso.
+ */
+function semearSequencia2() {
+  db.followups_pendentes = [{
+    id: FOLLOWUP_ID,
+    usuario_id: USUARIO_ID,
+    recibo_id: RECIBO_ID,
+    sessao_whatsapp_id: SESSAO_ID,
+    campo_alvo: "documento_prestador",
+    pergunta: PERGUNTA_CNPJ_SEM_LUGAR,
+    mensagens_restantes: 2,
+    expira_em: new Date(Date.now() + 20 * MINUTO).toISOString(),
+    respondida_em: null,
+    resolucao: null,
+    descartada_em: null,
+    descartada_motivo: null,
+    criado_em: new Date().toISOString(),
+  }];
+
+  db.recibos_evidencias = [{
+    id: RECIBO_ID,
+    usuario_id: USUARIO_ID,
+    descricao: "Consulta odontologica",
+    valor: 799,
+    valor_reembolsado: null,
+    data_despesa: "2026-08-10",
+    estabelecimento: null,
+    documento_prestador: null,
+    categoria: "SAUDE",
+    deducibilidade: "INDETERMINADO",
+    justificativa_deducibilidade: "Falta identificacao do prestador.",
+    confidence_score: 0.8,
+    status: "REVISAO_HUMANA",
+    requer_revisao_humana: true,
+    metadados_ia: {
+      motivos_revisao: ["Falta identificacao do prestador"],
+      campos_ausentes: ["documento_prestador"],
+      campos_bloqueantes: [],
+      possui_indicio_reembolso: false,
+      deducibilidade_se_desbloqueado: "DEDUTIVEL",
+      deducibilidade_se_sem_reembolso: null,
+    },
+  }];
+
+  // A analise que o Gemini real devolveu para "Foi do convenio" neste recibo,
+  // 6/6: reclassifica, nao identifica ninguem, e acende o indicio de reembolso.
+  // Era exatamente este booleano que a Fase 15 gravava na trilha e descartava.
+  respostaGemini = blocoExpense({
+    descricao: "Consulta odontologica",
+    estabelecimento: null,
+    documento_prestador: null,
+    categoria: "SAUDE",
+    deducibilidade: "INDETERMINADO",
+    requer_revisao_humana: true,
+    motivos_revisao: ["Falta identificacao do prestador", "Indicio de reembolso pelo convenio"],
+    possui_indicio_reembolso: true,
+    deducibilidade_se_desbloqueado: null,
+    deducibilidade_se_sem_reembolso: "DEDUTIVEL",
+  });
+  chamadasGemini = 0;
+}
+
+Deno.test("ACEITE seq2: reclassificacao acende o reembolso e ele vira pergunta", async () => {
+  semearSequencia2();
+
+  // Passo 2 do transcript: "Foi do convênio".
+  const passo2 = await resolver({
+    followup_id: FOLLOWUP_ID,
+    usuario_id: USUARIO_ID,
+    texto: "Foi do convênio",
+  });
+
+  assertEquals(passo2.corpo.resolvido, true);
+  assertEquals(passo2.corpo.modo, "RECLASSIFICADO");
+  assertEquals(passo2.corpo.promovido, false);
+  assertEquals(chamadasGemini, 1);
+
+  // O sinal que antes morria na trilha agora vira pergunta.
+  const aberta = pendenciaAberta();
+  assert(aberta, "o indicio de reembolso da analise nova nao virou pendencia");
+  assertEquals(aberta.campo_alvo, CAMPO_REEMBOLSO);
+  assertEquals(aberta.recibo_id, RECIBO_ID);
+
+  const mensagem: string = passo2.corpo.mensagem;
+  assert(mensagem.startsWith("Obrigado, anotei essa informação"), mensagem);
+  assert(mensagem.endsWith(PERGUNTA_REEMBOLSO), mensagem);
+
+  // E a analise crua continua inteira na trilha, ao lado da original.
+  assertEquals(
+    recibo().metadados_ia.reclassificacoes[0].analise.possui_indicio_reembolso,
+    true,
+  );
+
+  // Passo 3: a resposta ao reembolso fecha o que dava para fechar.
+  const passo3 = await resolver({
+    followup_id: aberta.id,
+    usuario_id: USUARIO_ID,
+    texto: "não",
+  });
+
+  assertEquals(passo3.corpo.resolvido, true);
+  assertEquals(passo3.corpo.modo, "REEMBOLSO_INFORMADO");
+  assertEquals(recibo().valor_reembolsado, 0);
+  // Sem identificacao, continua em revisao — correto, e o mesmo freio da Fase 15.
+  assertEquals(passo3.corpo.promovido, false);
+  assertEquals(recibo().status, "REVISAO_HUMANA");
+});
+
+Deno.test("a cadeia nunca repete um campo ja perguntado", async () => {
+  // O freio que torna verdadeira a invariante "no maximo dois passos". Sem ele,
+  // uma reclassificacao que nao preencheu o documento reabriria a MESMA pergunta
+  // que acabou de fechar, e a resposta seguinte reabriria de novo — laco
+  // limitado so pelo TTL e pelo orcamento de mensagens.
+  semearSequencia2();
+
+  await resolver({ followup_id: FOLLOWUP_ID, usuario_id: USUARIO_ID, texto: "Foi do convênio" });
+  const reembolso = pendenciaAberta()!;
+  assertEquals(reembolso.campo_alvo, CAMPO_REEMBOLSO);
+
+  await resolver({ followup_id: reembolso.id, usuario_id: USUARIO_ID, texto: "não" });
+
+  // documento_prestador ja foi perguntado no passo 1 e nao voltou a fila, mesmo
+  // com o recibo ainda sem identificacao e com destino residual declarado.
+  assertEquals(pendenciaAberta(), null);
+  const perguntados = db.followups_pendentes.map((f) => f.campo_alvo);
+  assertEquals(perguntados, ["documento_prestador", CAMPO_REEMBOLSO]);
+});
+
+Deno.test("recibo promovido nao ganha pergunta nova", async () => {
+  // O caso mais comum de todos: o documento chegou, a despesa foi promovida e
+  // nao ha mais nada a desbloquear. Perguntar ali seria atrito puro sobre uma
+  // despesa ja resolvida.
+  semear();
+
+  const { corpo } = await resolver(comDocumento());
+
+  assertEquals(corpo.promovido, true);
+  assertEquals(recibo().status, "APROVADO_AUTOMATICAMENTE");
+  assertEquals(pendenciaAberta(), null);
+  // E a mensagem termina na confirmacao, sem pergunta colada.
+  assert(!String(corpo.mensagem).includes("Para confirmar se é dedutível"), corpo.mensagem);
+});
+
+Deno.test("reembolso ja gravado nao vira pergunta, mesmo sem tê-lo perguntado", async () => {
+  // As duas guardas do encadeamento respondem perguntas DIFERENTES, e este e o
+  // unico teste que as separa:
+  //
+  //   camposJaPerguntados   -> "eu ja perguntei isso?"   (conversacional)
+  //   valor_reembolsado !== null -> "eu ja sei a resposta?" (factual)
+  //
+  // Em toda sequencia alcancavel hoje as duas coincidem, porque a unica forma de
+  // valor_reembolsado ser preenchido e respondendo a pergunta de reembolso — e
+  // por isso remover a segunda nao quebrava teste nenhum. A factual e a mais
+  // robusta das duas: se algum caminho futuro gravar a coluna sem ter conversado
+  // (correcao do contador, importacao do plano), so ela segura a pergunta.
+  //
+  // O cenario: pendencia de documento_prestador, reembolso JA registrado, e a
+  // analise ainda declarando possui_indicio_reembolso true.
+  //
+  // O recibo precisa continuar em revisao depois do patch, senao a execucao para
+  // no primeiro freio de proximaPergunta ("recibo promovido nao ganha pergunta")
+  // e a guarda de reembolso nem chega a ser consultada — foi assim que a
+  // primeira versao deste teste passou com a guarda arrancada.
+  semear({ camposBloqueantes: ["documento_prestador", "estabelecimento"] });
+  db.recibos_evidencias[0].valor_reembolsado = 120;
+  db.recibos_evidencias[0].estabelecimento = null;
+  db.recibos_evidencias[0].metadados_ia.possui_indicio_reembolso = true;
+  db.recibos_evidencias[0].metadados_ia.deducibilidade_se_sem_reembolso = "DEDUTIVEL";
+  // Historico limpo: nenhuma pendencia de reembolso jamais existiu neste recibo,
+  // entao camposJaPerguntados nao tem como ajudar.
+  respostaGemini = null;
+
+  const { corpo } = await resolver(comDocumento());
+
+  assertEquals(corpo.resolvido, true);
+  assertEquals(corpo.modo, "CAMPO_PREENCHIDO");
+  assertEquals(corpo.promovido, false);
+  assertEquals(recibo().status, "REVISAO_HUMANA");
+  // Nenhuma pergunta: o numero ja esta na coluna, e nenhuma IA foi chamada.
+  assertEquals(pendenciaAberta(), null);
+  assertEquals(chamadasGemini, 0);
+});
+
+Deno.test("documento preenchido nao gera pergunta de estabelecimento", async () => {
+  // A regra fiscal de SAUDE pede prestador OU estabelecimento, entao o CNPJ
+  // fecha o requisito inteiro. derivarCamposBloqueantes olha campo a campo e
+  // devolveria "estabelecimento" aqui — num lancamento novo isso nunca aparecia,
+  // porque a pendencia nascia uma vez so; com encadeamento, apareceria em todo
+  // CAMPO_PREENCHIDO de recibo sem nome de lugar.
+  semear({ camposBloqueantes: ["documento_prestador", "estabelecimento"] });
+  db.recibos_evidencias[0].estabelecimento = null;
+
+  const { corpo } = await resolver(comDocumento());
+
+  assertEquals(corpo.resolvido, true);
+  // Continua em revisao (sobrou bloqueante na lista semeada), entao o freio nao
+  // e o "recibo promovido" — e a identificacao ja satisfeita.
+  assertEquals(corpo.promovido, false);
+  assertEquals(recibo().status, "REVISAO_HUMANA");
+  assertEquals(recibo().documento_prestador, "11.222.333/0001-81");
+  assertEquals(pendenciaAberta(), null);
+});
+
+Deno.test("reembolso integral nao encadeia: nao ha o que desbloquear", async () => {
+  // Fecha em NAO_DEDUTIVEL com requer_revisao_humana false. Mesmo sem
+  // identificacao no recibo, nenhum CNPJ mudaria o desfecho.
+  semearReembolso({ valor: 300, deducibilidade: "DEDUTIVEL", estabelecimento: null });
+
+  const { corpo } = await resolver(comReembolso("300"));
+
+  assertEquals(corpo.resolvido, true);
+  assertEquals(recibo().deducibilidade, "NAO_DEDUTIVEL");
+  assertEquals(pendenciaAberta(), null);
+});
+
+Deno.test("falha ao encadear nao derruba a resolucao que ja aconteceu", async () => {
+  // Fail open, o principio que atravessa a fase inteira: a resposta ao usuario e
+  // o patch no recibo ja existem quando o encadeamento roda. O pior caso e a
+  // segunda pergunta nao ser feita, que e o comportamento de antes desta fase.
+  semearSequencia1();
+  falharRpc = true;
+
+  try {
+    const { status, corpo } = await resolver(comReembolso("não"));
+
+    assertEquals(status, 200);
+    assertEquals(corpo.resolvido, true);
+    assertEquals(corpo.modo, "REEMBOLSO_INFORMADO");
+    assertEquals(recibo().valor_reembolsado, 0);
+    assertEquals(followup().resolucao, "REEMBOLSO_INFORMADO");
+    // Mensagem sem pergunta colada, e nenhuma pendencia aberta — mas a
+    // resolucao valeu e o usuario recebeu a confirmacao.
+    assertEquals(corpo.mensagem, mensagemReembolsoNegadoSemPromocao());
+    assertEquals(pendenciaAberta(), null);
+  } finally {
+    falharRpc = false;
+  }
+});
+
+/** A confirmacao de "nao houve reembolso" sem promocao, exatamente como a
+ *  function a monta. Literal aqui provaria so que eu sei copiar string. */
+function mensagemReembolsoNegadoSemPromocao(): string {
+  return [
+    "Anotei que não houve reembolso nessa despesa.",
+    "Ela continua marcada para revisão do contador, mas agora com essa informação registrada.",
+  ].join("\n\n");
+}
 
 Deno.test("campo desconhecido na resolucao grava o mesmo rotulo da webhook", async () => {
   // Os dois componentes agora nomeiam a mesma condicao do mesmo jeito. Antes
