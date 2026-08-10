@@ -299,6 +299,31 @@ uso misto pessoal/profissional. A parte que sobra depois do reembolso e
 integralmente dedutivel. Quem desconta o valor e o backend, em coluna propria:
 nunca subtraia o reembolso do campo valor nem mencione valor liquido ali.
 
+MULTIPLAS DESPESAS NA MESMA MENSAGEM
+possui_multiplas_despesas e uma deteccao de risco. Marque true somente quando a
+mensagem ou evidencia declarar duas ou mais despesas AUTONOMAS, que deveriam
+virar registros fiscais separados — por exemplo, "gastei 50 no mercado e 30 no
+Uber" ou "paguei 80 no estacionamento do shopping e 140 de gasolina no posto".
+Cada gasto precisa representar uma compra, pagamento, servico ou deslocamento
+proprio, com finalidade, estabelecimento ou valor que o diferencie do outro.
+
+Nao conte simplesmente quantos numeros existem. Marque false quando a pessoa
+descrever um unico pagamento ou servico com composicao de preco, taxa,
+desconto, parcela, imposto, gorjeta ou item acessorio ja incluido no total. Em
+particular, "paguei 400 na consulta, incluindo 50 de estacionamento" e um
+unico total informado e deve ser false; o mesmo vale para "paguei 1.500 e mais
+300 de anestesista no dentista" quando o contexto apresenta o atendimento como
+uma unica despesa.
+
+Quando possui_multiplas_despesas for true:
+- requer_revisao_humana deve ser true, independentemente dos outros campos;
+- inclua em motivos_revisao que ha mais de uma despesa para o contador separar;
+- deducibilidade_se_desbloqueado e deducibilidade_se_sem_reembolso devem ser
+  null e pergunta_de_followup deve ser null: nao pergunte CNPJ, estabelecimento
+  nem reembolso para uma extracao que ja mistura despesas;
+- na mensagem_usuario, explique que o item foi registrado junto somente para
+  revisao e separacao pelo contador e recomende enviar uma despesa por mensagem.
+
 FORMATO DE RESPOSTA OBRIGATORIO
 Responda sempre com duas partes:
 
@@ -330,6 +355,7 @@ SCHEMA DO JSON
   "evidencias_extraidas": ["string"],
   "campos_ausentes": ["string"],
   "deducibilidade_se_desbloqueado": "DEDUTIVEL|PARCIALMENTE_DEDUTIVEL|null",
+  "possui_multiplas_despesas": false,
   "possui_indicio_reembolso": false,
   "deducibilidade_se_sem_reembolso": "DEDUTIVEL|PARCIALMENTE_DEDUTIVEL|null",
   "possui_indicio_tuss_cbhpm": false,
@@ -385,6 +411,7 @@ Boa, registrei como despesa de saude e vou deixar separado para revisao do conta
   "evidencias_extraidas": ["consulta clinica", "R$ 350,00", "Clinica Exemplo"],
   "campos_ausentes": ["documento_prestador"],
   "deducibilidade_se_desbloqueado": "DEDUTIVEL",
+  "possui_multiplas_despesas": false,
   "possui_indicio_reembolso": false,
   "deducibilidade_se_sem_reembolso": null,
   "possui_indicio_tuss_cbhpm": false,

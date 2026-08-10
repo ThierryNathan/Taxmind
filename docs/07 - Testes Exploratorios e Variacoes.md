@@ -362,15 +362,33 @@ lancamento ainda entra aprovado automaticamente, sem revisao humana — dois
 gastos nao relacionados viram uma linha de R$ 80 em `OUTROS`, e a trilha de
 auditoria nasce errada.
 
-Suporte de verdade e mudanca de escopo (o workflow grava um recibo por
-execucao, e o follow-up pressupoe uma despesa por pendencia), entao **nao foi
-implementado**, conforme combinado.
+Suporte de verdade continua sendo mudanca de escopo: o workflow grava um recibo
+por execucao, e o follow-up pressupoe uma despesa por pendencia. Ele **nao**
+separa nem recalcula as linhas.
 
-Mitigacao intermediaria, se o suporte completo demorar: fazer o prompt marcar
-`requer_revisao_humana: true` quando identificar mais de uma despesa na mesma
-mensagem. Nao resolve, mas troca "trilha errada em silencio" por "trilha
-sinalizada", e cabe numa linha do prompt. Continua sendo mudanca nas tres
-copias do prompt fiscal, com medicao propria.
+### Mitigacao aplicada
+
+O schema agora traz `possui_multiplas_despesas`. O Gemini marca `true` apenas
+para gastos autonomos que precisariam de registro separado; ele nao conta
+numeros. Assim, `gastei 50 no mercado e 30 no uber` e dois estabelecimentos
+com valores distintos sao positivos, enquanto `paguei 400 na consulta,
+incluindo 50 de estacionamento` e `paguei 1.500 e mais 300 de anestesista no
+dentista` seguem como um total composto.
+
+O booleano e somente a declaracao da IA. O Code node `Montar Payload do
+Recibo` decide a acao: `true` forca `requer_revisao_humana`, portanto o item
+nunca chega ao ramo de aprovacao automatica; tambem suprime follow-up de CNPJ,
+estabelecimento ou reembolso. A mensagem ao usuario e deterministica e explica
+que o total ficou como um unico item, em revisao, para o contador separar,
+pedindo uma despesa por mensagem dali em diante.
+
+Medicao no `gemini-3-flash-preview`, temperatura 0.2, em **3 execucoes por
+caso critico**: os dois positivos ficaram `true` em 3/3 e o caso do
+estacionamento ficou `false` em 3/3. Os sete casos unitarios ja registrados
+neste documento ficaram `false`; uma mensalidade completa e identificada
+permaneceu aprovavel. A medicao vive em
+`tests/multiplas_despesas_gemini_test.ts`, e a garantia deterministica do
+workflow em `tests/n8n_multiplas_despesas_test.ts`.
 
 ## 4. Como reproduzir
 

@@ -194,12 +194,16 @@ Deno.test("a decisao de status le requer_revisao_humana, nunca data_inferida", a
   assertEquals(emRevisao.json.metadados_ia.data_inferida, true);
 
   // E a leitura estatica do node, que e o que de fato vai rodar na instancia.
-  const linhaStatus = node(RECEIPT, "Montar Payload do Recibo").parameters.jsCode
-    .split("\n")
-    .find((linha: string) => linha.trimStart().startsWith("const status ="));
+  const linhasDoNode = node(RECEIPT, "Montar Payload do Recibo").parameters.jsCode.split("\n");
+  const linhaStatus = linhasDoNode.find((linha: string) => linha.trimStart().startsWith("const status ="));
+  const linhaRevisao = linhasDoNode.find((linha: string) =>
+    linha.trimStart().startsWith("const requerRevisaoHumana =")
+  );
   assert(linhaStatus, "linha de decisao de status nao encontrada");
-  assert(linhaStatus!.includes("parsed.requer_revisao_humana"));
-  assertFalse(linhaStatus!.includes("data_inferida"));
+  assert(linhaRevisao, "linha de derivacao de revisao nao encontrada");
+  assert(linhaStatus!.includes("requerRevisaoHumana"));
+  assert(linhaRevisao!.includes("parsed.requer_revisao_humana"));
+  assertFalse((linhaStatus! + linhaRevisao!).includes("data_inferida"));
 });
 
 Deno.test("data afirmada pela IA e preservada e nao vira inferida", async () => {
