@@ -168,6 +168,22 @@ Incidente completo em `docs/09 - Incidente de Deploy Parcial.md`.
 - O endpoint de analytics de log (`/analytics/endpoints/logs.all`) devolveu `{"result":[]}` para toda consulta, inclusive sem filtro. Isso e falta de acesso, nao ausencia de invocacao — nao serve de evidencia em nenhuma direcao.
 - Motivo de descarte de pendencia tem **quatro** valores distintos e nenhum deles pode compartilhar rotulo: `CAMPO_DESCONHECIDO` (versao publicada nao conhece o campo), `EXPIRADA` (tempo), `ORCAMENTO_ESGOTADO` (mensagens), `SUPERSEDIDA` (despesa nova tomou a vaga). Enquanto o primeiro se chamava `EXPIRADA`, a trilha afirmava pendencia expirada 30 minutos antes do proprio `expira_em` com o orcamento intacto, e a investigacao comecou no lugar errado. `descartada_motivo` e texto livre — mudar rotulo nao pede migration.
 
+### Calculo do IRPF (tabela + redutor)
+
+Parametros em `supabase/functions/_shared/irpf_parametros.ts`, conta em
+`_shared/irpf_calculo.ts`. Fixtures de proveniencia em
+`tests/fixtures/simulador-irpf/`.
+
+- Desde a Lei 15.270/2025 o imposto tem **duas camadas em sequencia**: tabela progressiva e, depois dela, um redutor. Calcular so pela tabela superestima o imposto de quem esta na faixa do redutor, e "imposto(base) - imposto(base - deducao)" pela tabela superestima a economia de uma deducao.
+- Os dois redutores sao dispositivos **diferentes, com vigencias diferentes**: o MENSAL e o art. 3o-A (a partir de janeiro de 2026, retencao na fonte) e o ANUAL e o **art. 11-A** (a partir do exercicio 2027, ano-calendario 2026). O ano-calendario 2025 — que e o baseline tipico de uma declaracao importada hoje — **nao tem redutor nenhum**. Por isso os parametros sao indexados por `ano_calendario` e `parametrosDoAno` devolve `null` para ano desconhecido em vez de cair no ano mais proximo.
+- O redutor incide sobre **rendimentos tributaveis**, nao sobre a base de calculo (a lei escreve "0,095575 x rendimentos tributaveis sujeitos ao ajuste anual"). Deduzir mais nao aumenta o redutor. E ele e **limitado ao imposto da tabela** (§1o dos dois artigos): quando a deducao derruba o imposto abaixo do redutor, o excedente se perde e a economia da deducao deixa de ser linear — pode ser zero para quem ja estava zerado.
+- `GET https://www27.receita.fazenda.gov.br/api/simulador/tabela/{ano}` e o servico de parametros que alimenta o Simulador de Aliquotas Efetivas da Receita, e serve de fonte primaria legivel por maquina. **Armadilha:** o bloco ANUAL de `/tabela/2026` devolve a tabela de 2025 (28.467,20 / 10.853,78) e nao a de 2026 (29.145,60 / 10.904,66). A causa esta na interface: a aba mensal pergunta "Ano-calendario" e a anual pergunta "Exercicio", as duas batem no mesmo endpoint, e o exercicio 2027 ainda nao existe. Quem puxar aquele bloco achando que e AC2026 usa a tabela do ano passado sem nenhum sintoma. O bloco mensal do mesmo payload esta correto.
+- O simulador **trunca**, nao arredonda: `trunc(e,t){return Math.trunc(e*Math.pow(10,t))/Math.pow(10,t)}`, aplicado uma vez so em `imposto - reducao`. Nao e detalhe: no exemplo 5 da propria Receita a soma das faixas da 1.016,2785, e so a truncagem reproduz o R$ 1.016,27 publicado (arredondar daria 1.016,28).
+- Ele tambem apura o imposto **somando faixa a faixa**, e nao pelo atalho "base x aliquota - parcela a deduzir". Os dois coincidem em aritmetica exata, mas a parcela publicada e arredondada ao centavo — na anual de 2026 a exata seria 10.904,658. `impostoPelaParcelaDeduzir` existe so para o teste cruzar os dois caminhos, o que valida cada parcela publicada sem depender de fonte externa.
+- Divergencia entre fontes secundarias sobre a parcela de 27,5% em 2025 tem explicacao simples: **a tabela mensal mudou no meio do ano**. Janeiro a abril usa 896,00; maio em diante, 908,73 (que e tambem a de 2026). Quem cita um valor so para "2025" acerta quatro meses.
+- A formula do redutor anual **nao zera exatamente** no teto: 8.429,73 - 0,095575 x 88.200 = 0,015. E residuo do arredondamento das constantes da lei; a implementacao segue a formula e deixa o §2o zerar acima do teto, em vez de inventar um clamp.
+- Teste com rede (`--allow-net`) rebaixa os tres payloads e compara com as fixtures: mudanca de parametro na Receita falha o teste. Sem rede ele e ignorado, como o `deploy_drift_test.ts`.
+
 ### Gemini
 
 - Modelos 3.x usam `generationConfig.thinkingConfig.thinkingLevel` (`minimal`/`low`/`medium`/`high`). O `thinkingBudget` e da geracao 2.5 e nao vale aqui.

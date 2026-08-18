@@ -23,6 +23,18 @@ import {
   valorLiquido,
 } from "../supabase/functions/_shared/export_contador.ts";
 
+/** Comparacao insensivel a acento.
+ *
+ * As asserssoes deste arquivo cobram CONTEUDO ("a nota fala de base de
+ * calculo?"), nao ortografia — e a varredura de acentuacao de 2026-08-16
+ * mostrou que cravar a grafia aqui transforma correcao de texto em quebra de
+ * teste. A grafia tem dono proprio: os testes de espelho comparam texto a
+ * texto entre as copias vivas.
+ */
+function semAcento(valor: string): string {
+  return valor.normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
 Deno.env.set("SUPABASE_URL", "http://supabase.test");
 Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "service_role_de_teste");
 
@@ -327,7 +339,7 @@ Deno.test("o cabecalho traz preparo, nome e periodo coberto", () => {
 
   for (const aba of [ABA_PAGAMENTOS, ABA_LIVRO_CAIXA]) {
     const texto = textoDaAba(wb, aba);
-    assert(texto.includes("Preparado para revisao contabil"), aba);
+    assert(semAcento(texto).includes("Preparado para revisao contabil"), aba);
     assert(texto.includes("Maria Teste"), `nome ausente em ${aba}`);
     // Periodo das linhas EXPORTADAS: 05/02 (primeira saude) a 04/06 (moradia).
     // As descartadas usam 10/03 e nao podem esticar nem encurtar a faixa.
@@ -441,8 +453,8 @@ Deno.test("usuario sem despesa exportavel ainda recebe as duas abas", () => {
 
   for (const aba of wb.SheetNames) {
     const texto = textoDaAba(wb, aba);
-    assert(texto.includes("Nenhuma despesa desta natureza"), aba);
-    assert(texto.includes("sem lancamentos"), `periodo vazio errado em ${aba}`);
+    assert(semAcento(texto).includes("Nenhuma despesa desta natureza"), aba);
+    assert(semAcento(texto).includes("sem lancamentos"), `periodo vazio errado em ${aba}`);
   }
   // A nota do carne-leao vale mesmo com a aba vazia: ela explica o mecanismo,
   // nao as linhas.

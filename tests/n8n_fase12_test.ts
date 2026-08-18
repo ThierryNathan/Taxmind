@@ -21,6 +21,18 @@ const CONSULTA = JSON.parse(
   await Deno.readTextFile("n8n/workflows/consulta-e-dossie.json"),
 );
 
+/** Comparacao insensivel a acento.
+ *
+ * As asserssoes deste arquivo cobram CONTEUDO ("a nota fala de base de
+ * calculo?"), nao ortografia — e a varredura de acentuacao de 2026-08-16
+ * mostrou que cravar a grafia aqui transforma correcao de texto em quebra de
+ * teste. A grafia tem dono proprio: os testes de espelho comparam texto a
+ * texto entre as copias vivas.
+ */
+function semAcento(valor: string): string {
+  return valor.normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
 function node(workflow: any, nome: string) {
   const alvo = workflow.nodes.find((n: any) => n.name === nome);
   if (!alvo) throw new Error(`node nao encontrado no export: ${nome}`);
@@ -257,7 +269,7 @@ Deno.test("resumo explica que dedutivel reduz a base de calculo, nao o imposto",
     { categoria: "SAUDE", total: 450, total_dedutivel: 450, pendente_revisao: 0, quantidade: 1 },
   ]);
 
-  const mensagem: string = saida.json.mensagem;
+  const mensagem: string = semAcento(saida.json.mensagem);
   assert(mensagem.includes("base de calculo do IR"), mensagem);
   assert(mensagem.includes("nao e o valor que voce recebe de volta"), mensagem);
   assert(mensagem.includes("faixa de tributacao"), mensagem);
@@ -268,10 +280,10 @@ Deno.test("resumo sem valor dedutivel nao carrega a explicacao", async () => {
     { categoria: "ALIMENTACAO", total: 90, total_dedutivel: 0, pendente_revisao: 0, quantidade: 2 },
   ]);
 
-  assertFalse(saida.json.mensagem.includes("base de calculo"));
+  assertFalse(semAcento(saida.json.mensagem).includes("base de calculo"));
 });
 
 Deno.test("resumo vazio continua com a mensagem de primeiro uso", async () => {
   const saida = await formatarResumo([]);
-  assert(saida.json.mensagem.includes("ainda nao tem despesas registradas"));
+  assert(semAcento(saida.json.mensagem).includes("ainda nao tem despesas registradas"));
 });

@@ -13,6 +13,18 @@ import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.t
 import { PDFDocument, StandardFonts } from "https://esm.sh/pdf-lib@1.17.1";
 import { inflateSync } from "node:zlib";
 
+/** Comparacao insensivel a acento.
+ *
+ * As asserssoes deste arquivo cobram CONTEUDO ("a nota fala de base de
+ * calculo?"), nao ortografia — e a varredura de acentuacao de 2026-08-16
+ * mostrou que cravar a grafia aqui transforma correcao de texto em quebra de
+ * teste. A grafia tem dono proprio: os testes de espelho comparam texto a
+ * texto entre as copias vivas.
+ */
+function semAcento(valor: string): string {
+  return valor.normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
 Deno.env.set("SUPABASE_URL", "http://supabase.test");
 Deno.env.set("SUPABASE_SERVICE_ROLE_KEY", "service_role_de_teste");
 
@@ -54,7 +66,7 @@ Deno.test("cada linha da nota cabe na largura util da pagina", async () => {
 });
 
 Deno.test("a nota diz o que deducao faz e o que ela nao e", () => {
-  const texto = NOTA_DEDUCAO.join(" ").toLowerCase();
+  const texto = semAcento(NOTA_DEDUCAO.join(" ").toLowerCase());
   assert(texto.includes("base de calculo do ir"), texto);
   assert(texto.includes("faixa de tributacao"), texto);
   assert(texto.includes("nao e o valor que voce recebe de volta"), texto);
@@ -110,11 +122,11 @@ Deno.test("o PDF gerado carrega a nota no cabecalho", async () => {
 
   assertEquals(new TextDecoder("latin1").decode(bytes.slice(0, 5)), "%PDF-");
 
-  const texto = textoDoPdf(bytes);
+  const texto = semAcento(textoDoPdf(bytes));
   assert(texto.includes("TaxMind - Dossie Fiscal"), "cabecalho nao encontrado no PDF");
   for (const linha of NOTA_DEDUCAO) {
     // sanitize troca o travessao por hifen antes de desenhar.
-    const esperado = linha.replace("—", "-");
+    const esperado = semAcento(linha.replace("—", "-"));
     assert(texto.includes(esperado), `nao encontrei no PDF: ${esperado}`);
   }
   // A tabela continua sendo desenhada: a nota nao empurrou o conteudo para fora.
@@ -190,7 +202,7 @@ Deno.test("as colunas somam exatamente a largura util", async () => {
 
 Deno.test("o dossie mostra bruto, reembolso e liquido sem apagar nenhum", async () => {
   const bytes = await buildDossierPdf("Contribuinte de Teste", RECIBOS_COM_REEMBOLSO as never);
-  const texto = textoDoPdf(bytes);
+  const texto = semAcento(textoDoPdf(bytes));
 
   // O bruto continua na linha: e ele que a nota fiscal comprova, e e sobre ele
   // que o cruzamento da DMED acontece.

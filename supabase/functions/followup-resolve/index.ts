@@ -63,6 +63,7 @@ import {
   respostaSemConteudo,
 } from "../_shared/followup.ts";
 import { TAXMIND_SYSTEM_PROMPT } from "../_shared/prompt_fiscal.ts";
+import { rotuloEnum } from "../_shared/rotulos.ts";
 
 type ResolveRequest = {
   followup_id?: string;
@@ -979,8 +980,11 @@ function motivoRestante(recibo: Recibo): string {
   return primeiro ? ` (${primeiro.toLowerCase()})` : "";
 }
 
+// Rotulo minusculo para encaixar na frase ("fica classificada como parcialmente
+// dedutível"). Vive em _shared/rotulos.ts junto com o do dossie e o do export:
+// os tres rendiam o mesmo enum ASCII e entregavam texto sem acento.
 function humanizar(valor: string): string {
-  return valor.toLowerCase().replaceAll("_", " ");
+  return rotuloEnum(valor);
 }
 
 function isServiceRoleCaller(request: Request) {

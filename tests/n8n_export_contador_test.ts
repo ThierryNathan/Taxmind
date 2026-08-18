@@ -24,6 +24,18 @@ const CONSULTA = JSON.parse(
   await Deno.readTextFile("n8n/workflows/consulta-e-dossie.json"),
 );
 
+/** Comparacao insensivel a acento.
+ *
+ * As asserssoes deste arquivo cobram CONTEUDO ("a nota fala de base de
+ * calculo?"), nao ortografia — e a varredura de acentuacao de 2026-08-16
+ * mostrou que cravar a grafia aqui transforma correcao de texto em quebra de
+ * teste. A grafia tem dono proprio: os testes de espelho comparam texto a
+ * texto entre as copias vivas.
+ */
+function semAcento(valor: string): string {
+  return valor.normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
 function node(nome: string) {
   const alvo = CONSULTA.nodes.find((n: any) => n.name === nome);
   if (!alvo) throw new Error(`node nao encontrado no export: ${nome}`);
@@ -251,7 +263,7 @@ Deno.test("sobre_o_taxmind e a ajuda generica citam a planilha", () => {
 
   const ajuda = node("WhatsApp - Enviar Ajuda").parameters.jsonBody;
   assert(ajuda.includes("planilha"), "a ajuda generica nao cita a planilha");
-  assert(ajuda.includes("dossie"), "a ajuda generica perdeu o dossie");
+  assert(semAcento(ajuda).includes("dossie"), "a ajuda generica perdeu o dossie");
 });
 
 Deno.test("boas-vindas e sobre_o_taxmind anunciam as mesmas capacidades", () => {

@@ -17,6 +17,13 @@
 // entrega real de e-mail. Isso depende de `supabase db push` e de conta Resend.
 
 import { assert, assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
+
+/** Comparacao insensivel a acento: estas asserssoes cobram CONTEUDO da
+ *  mensagem, nao ortografia. Ver o mesmo helper em tests/n8n_fase12_test.ts. */
+function semAcento(valor: string): string {
+  return valor.normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
 import { hmacSha256Hex } from "../supabase/functions/_shared/bootstrap_token.ts";
 import { hashCodigoVerificacao } from "../supabase/functions/_shared/verificacao.ts";
 
@@ -410,7 +417,7 @@ Deno.test({
       const validade = new Date(registro.expira_em).getTime() - Date.now();
       assert(validade > 14 * MINUTO && validade <= 15 * MINUTO + 2000, `validade: ${validade}ms`);
 
-      assertMatch(ultimaMensagemWhatsApp(), /codigo de 6 digitos/);
+      assertMatch(semAcento(ultimaMensagemWhatsApp()), /codigo de 6 digitos/);
       assertMatch(ultimaMensagemWhatsApp(), /c\*\*\*e@exemplo\.test/);
       // O e-mail mascarado tambem protege o WhatsApp de entregar o endereco.
       assert(!ultimaMensagemWhatsApp().includes("contribuinte@exemplo.test"));
@@ -426,7 +433,7 @@ Deno.test({
       assertEquals(capturado.emails.length, 1, "nao pode disparar segundo e-mail");
       assertEquals(db.codigos_verificacao.length, 1);
       assertEquals(capturado.n8n.length, 0);
-      assertMatch(ultimaMensagemWhatsApp(), /Digite so o codigo/);
+      assertMatch(semAcento(ultimaMensagemWhatsApp()), /Digite so o codigo/);
       assertEquals(db.codigos_verificacao[0].tentativas, 0, "nao pode consumir tentativa");
     });
 
@@ -434,7 +441,7 @@ Deno.test({
       await (await enviarMensagem({ texto: "paguei 123456 no boleto" })).body?.cancel();
 
       assertEquals(db.codigos_verificacao[0].tentativas, 0);
-      assertMatch(ultimaMensagemWhatsApp(), /Digite so o codigo/);
+      assertMatch(semAcento(ultimaMensagemWhatsApp()), /Digite so o codigo/);
     });
 
     await t.step("codigo errado consome tentativa e informa o saldo", async () => {
@@ -567,7 +574,7 @@ Deno.test({
       assertEquals(db.codigos_verificacao.length, 1);
       assertEquals(db.codigos_verificacao[0].invalidado_motivo, "ENVIO_FALHOU");
       assertEquals(eventos("CODIGO_VERIFICACAO_ENVIO_FALHOU").length, 1);
-      assertMatch(ultimaMensagemWhatsApp(), /nao consegui enviar o codigo/);
+      assertMatch(semAcento(ultimaMensagemWhatsApp()), /nao consegui enviar o codigo/);
       assertEquals(capturado.n8n.length, 0);
 
       // Codigo invalidado libera a proxima geracao (a unique parcial nao barra).

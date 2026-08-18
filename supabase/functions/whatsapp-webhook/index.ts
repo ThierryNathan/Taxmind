@@ -148,7 +148,7 @@ serve(async (request) => {
             `Oi, ${event.profileName ?? "tudo bem"}! Sou o TaxMind.`,
             "Para proteger seus dados fiscais, preciso confirmar seu e-mail e CPF em um ambiente seguro antes de guardar qualquer recibo.",
             `Comece por aqui: ${onboardingUrl}`,
-            "Assim que terminar, e so voltar aqui e me mandar seus recibos.",
+            "Assim que terminar, é só voltar aqui e me mandar seus recibos.",
           ].join("\n\n"),
         );
         continue;
@@ -500,8 +500,8 @@ async function tratarCodigoPendente(
 
     // Mensagem comum durante a verificacao: relembra sem gastar outro e-mail.
     await sendWhatsAppText(event.message.from, [
-      `Antes de continuar, preciso confirmar que e voce mesmo: enviei um codigo de ${CODIGO_DIGITOS} digitos para ${destino}.`,
-      "Digite so o codigo aqui para eu liberar seu historico.",
+      `Antes de continuar, preciso confirmar que é você mesmo: enviei um código de ${CODIGO_DIGITOS} dígitos para ${destino}.`,
+      "Digite só o código aqui para eu liberar seu histórico.",
     ].join("\n\n"));
     return "bloqueado";
   }
@@ -521,7 +521,7 @@ async function tratarCodigoPendente(
       });
       await sendWhatsAppText(event.message.from, [
         "Identidade confirmada, obrigado!",
-        "Pode seguir normalmente: me manda o recibo ou a pergunta que voce quer resolver agora.",
+        "Pode seguir normalmente: me manda o recibo ou a pergunta que você quer resolver agora.",
       ].join("\n\n"));
       // A mensagem que trouxe o codigo nao e despesa nem consulta: nada a
       // encaminhar. A partir da proxima, o fluxo volta ao normal.
@@ -538,8 +538,8 @@ async function tratarCodigoPendente(
         tentativas_restantes: resultado.tentativasRestantes,
       });
       await sendWhatsAppText(event.message.from, [
-        "Esse codigo nao confere.",
-        `Confira o e-mail enviado para ${destino} e tente de novo — voce tem ${resultado.tentativasRestantes} tentativa(s) restante(s).`,
+        "Esse código não confere.",
+        `Confira o e-mail enviado para ${destino} e tente de novo — você tem ${resultado.tentativasRestantes} tentativa(s) restante(s).`,
       ].join("\n\n"));
       return "bloqueado";
     }
@@ -552,8 +552,8 @@ async function tratarCodigoPendente(
         codigo_id: codigo.id,
       });
       await sendWhatsAppText(event.message.from, [
-        "Esse codigo foi bloqueado por excesso de tentativas.",
-        "Me manda qualquer mensagem que eu envio um codigo novo para o seu e-mail.",
+        "Esse código foi bloqueado por excesso de tentativas.",
+        "Me manda qualquer mensagem que eu envio um código novo para o seu e-mail.",
       ].join("\n\n"));
       return "bloqueado";
     }
@@ -562,7 +562,7 @@ async function tratarCodigoPendente(
       await invalidarCodigo(codigo.id, "EXPIRADO");
       await sendWhatsAppText(
         event.message.from,
-        `Esse codigo expirou (ele vale ${CODIGO_TTL_MINUTOS} minutos). Estou enviando um novo agora.`,
+        `Esse código expirou (ele vale ${CODIGO_TTL_MINUTOS} minutos). Estou enviando um novo agora.`,
       );
       return "gerar_novo";
     }
@@ -618,8 +618,8 @@ async function iniciarReverificacao(
     // manda segundo e-mail, so relembra.
     if (error.code === "23505") {
       await sendWhatsAppText(event.message.from, [
-        `Ja enviei um codigo de ${CODIGO_DIGITOS} digitos para ${destino}.`,
-        "Digite so o codigo aqui para continuar.",
+        `Já enviei um código de ${CODIGO_DIGITOS} dígitos para ${destino}.`,
+        "Digite só o código aqui para continuar.",
       ].join("\n\n"));
       return "bloqueado";
     }
@@ -640,7 +640,7 @@ async function iniciarReverificacao(
       codigo_id: inserido.id,
     });
     await sendWhatsAppText(event.message.from, [
-      "Preciso confirmar sua identidade por e-mail, mas nao consegui enviar o codigo agora.",
+      "Preciso confirmar sua identidade por e-mail, mas não consegui enviar o código agora.",
       "Tente novamente em alguns minutos — se persistir, fale com o suporte.",
     ].join("\n\n"));
     return "bloqueado";
@@ -657,9 +657,9 @@ async function iniciarReverificacao(
   });
 
   await sendWhatsAppText(event.message.from, [
-    `Faz mais de ${JANELA_CONFIANCA_DIAS} dias desde a ultima vez que confirmamos sua identidade, e seus dados fiscais ficam protegidos por essa checagem.`,
-    `Enviei um codigo de ${CODIGO_DIGITOS} digitos para ${destino}. Ele vale ${CODIGO_TTL_MINUTOS} minutos.`,
-    "Digite o codigo aqui e eu sigo com o que voce me mandou.",
+    `Faz mais de ${JANELA_CONFIANCA_DIAS} dias desde a última vez que confirmamos sua identidade, e seus dados fiscais ficam protegidos por essa checagem.`,
+    `Enviei um código de ${CODIGO_DIGITOS} dígitos para ${destino}. Ele vale ${CODIGO_TTL_MINUTOS} minutos.`,
+    "Digite o código aqui e eu sigo com o que você me mandou.",
   ].join("\n\n"));
 
   return "bloqueado";
@@ -847,9 +847,9 @@ async function enviarCodigoPorEmail(email: string, codigo: string): Promise<bool
 
   const linhas = [
     "Recebemos uma mensagem sua no WhatsApp do TaxMind.",
-    `Seu codigo de verificacao e: ${codigo}`,
-    `O codigo vale ${CODIGO_TTL_MINUTOS} minutos e serve apenas para confirmar sua identidade no WhatsApp.`,
-    "Se nao foi voce, ignore este e-mail e nao compartilhe o codigo com ninguem.",
+    `Seu código de verificação é: ${codigo}`,
+    `O código vale ${CODIGO_TTL_MINUTOS} minutos e serve apenas para confirmar sua identidade no WhatsApp.`,
+    "Se não foi você, ignore este e-mail e não compartilhe o código com ninguém.",
   ];
 
   try {
@@ -862,7 +862,7 @@ async function enviarCodigoPorEmail(email: string, codigo: string): Promise<bool
       body: JSON.stringify({
         from: remetente,
         to: [email],
-        subject: "TaxMind - codigo de verificacao",
+        subject: "TaxMind - código de verificação",
         text: linhas.join("\n\n"),
         html: `<p>${linhas.join("</p><p>")}</p>`,
       }),

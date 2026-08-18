@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
 import { PDFDocument, PDFFont, PDFPage, StandardFonts, rgb } from "https://esm.sh/pdf-lib@1.17.1";
+import { rotuloTitulo } from "../_shared/rotulos.ts";
 
 type DossierRequest = {
   usuario_id: string;
@@ -45,8 +46,8 @@ const BOTTOM_LIMIT = 60;
 // Quebrado em linhas fixas de proposito: o cabecalho nao tem quebra automatica,
 // e tests/dossie_nota_deducao_test.ts prova que cada linha cabe na largura util.
 export const NOTA_DEDUCAO = [
-  "Valores dedutiveis reduzem a base de calculo do IR — a economia real depende da sua",
-  "faixa de tributacao. Nao e o valor que voce recebe de volta.",
+  "Valores dedutíveis reduzem a base de cálculo do IR — a economia real depende da sua",
+  "faixa de tributação. Não é o valor que você recebe de volta.",
 ];
 
 // A soma das larguras e exatamente a largura util (595 - 2 * 40 = 515), e
@@ -56,7 +57,7 @@ export const NOTA_DEDUCAO = [
 // seria a tabela vazar a margem.
 export const COLUMNS = [
   { key: "data", label: "Data", width: 55 },
-  { key: "descricao", label: "Descricao", width: 115 },
+  { key: "descricao", label: "Descrição", width: 115 },
   { key: "categoria", label: "Categoria", width: 75 },
   { key: "valor", label: "Valor", width: 60 },
   { key: "reembolso", label: "Reembolso", width: 55 },
@@ -90,7 +91,7 @@ serve(async (request) => {
     }
 
     const recibos = await fetchRecibos(usuarioId);
-    const pdfBytes = await buildDossierPdf(usuario.nome ?? "Usuario TaxMind", recibos);
+    const pdfBytes = await buildDossierPdf(usuario.nome ?? "Usuário TaxMind", recibos);
 
     const filename = `dossie-taxmind-${formatDateForFilename(new Date())}.pdf`;
     const storagePath = `${usuarioId}/${filename}`;
@@ -293,13 +294,13 @@ export async function buildDossierPdf(nome: string, recibos: ReciboRow[]) {
 
     y -= 14;
     page.drawText(
-      sanitize(`Total dedutivel (liquido do reembolso): ${formatCurrency(totalDedutivel)}`),
+      sanitize(`Total dedutível (líquido do reembolso): ${formatCurrency(totalDedutivel)}`),
       { x: MARGIN, y, size: 10, font: bold },
     );
   }
 
   y -= 16;
-  page.drawText(sanitize(`Lancamentos: ${recibos.length}`), {
+  page.drawText(sanitize(`Lançamentos: ${recibos.length}`), {
     x: MARGIN,
     y,
     size: 9,
@@ -312,7 +313,7 @@ export async function buildDossierPdf(nome: string, recibos: ReciboRow[]) {
 function drawHeader(page: PDFPage, bold: PDFFont, font: PDFFont, nome: string) {
   let y = PAGE_HEIGHT - MARGIN;
 
-  page.drawText(sanitize("TaxMind - Dossie Fiscal"), {
+  page.drawText(sanitize("TaxMind - Dossiê Fiscal"), {
     x: MARGIN,
     y,
     size: 18,
@@ -404,9 +405,11 @@ function fitToWidth(value: string, font: PDFFont, size: number, maxWidth: number
   return `${truncated}...`;
 }
 
+// Rotulo em portugues correto, compartilhado com a export-contador e a
+// followup-resolve. Antes daqui saia "Saude"/"Revisao humana" no PDF, porque o
+// enum e ASCII por ser identificador de banco.
 function humanize(value: string) {
-  if (!value) return "";
-  return value.charAt(0) + value.slice(1).toLowerCase().replaceAll("_", " ");
+  return rotuloTitulo(value);
 }
 
 function formatCurrency(value: number) {

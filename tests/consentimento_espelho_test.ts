@@ -18,6 +18,17 @@ import {
   CONSENTIMENTO_ATUAL as ESPELHO,
   textoCanonicoConsentimento as canonicoDoEspelho,
 } from "../apps/onboarding/src/lib/consentimento.js";
+/** Comparacao insensivel a acento.
+ *
+ * As asserssoes abaixo cobram CONTEUDO ("a nota fala de base de calculo?"), nao
+ * ortografia — e a varredura de acentuacao de 2026-08-16 mostrou que cravar a
+ * grafia aqui transforma correcao de texto em quebra de teste. A grafia tem
+ * dono proprio: os testes de espelho comparam texto a texto entre as copias.
+ */
+function semAcento(valor: string): string {
+  return valor.normalize("NFD").replace(/[̀-ͯ]/g, "");
+}
+
 
 Deno.test("o texto exibido no onboarding e o texto registrado pela Edge Function", () => {
   assertEquals(canonicoDoEspelho(ESPELHO), textoCanonicoConsentimento(CANONICO));
@@ -25,7 +36,7 @@ Deno.test("o texto exibido no onboarding e o texto registrado pela Edge Function
 });
 
 Deno.test("o texto cobre os quatro pontos exigidos pela fase", () => {
-  const texto = textoCanonicoConsentimento().toLowerCase();
+  const texto = semAcento(textoCanonicoConsentimento().toLowerCase());
 
   assert(texto.includes("tcc") && texto.includes("prototipo"), "prototipo academico");
   assert(texto.includes("saude") && texto.includes("sensivel"), "dado sensivel de saude");
@@ -33,7 +44,7 @@ Deno.test("o texto cobre os quatro pontos exigidos pela fase", () => {
   assert(texto.includes("exclusao"), "direito de exclusao");
   // O rotulo do checkbox precisa ser afirmativo por si so: e ele que fica
   // ao lado da caixa que a pessoa marca.
-  assert(CANONICO.rotuloCheckbox.toLowerCase().startsWith("li e concordo"));
+  assert(semAcento(CANONICO.rotuloCheckbox.toLowerCase()).startsWith("li e concordo"));
 });
 
 Deno.test("hash canonico e estavel e sensivel a qualquer edicao do texto", async () => {

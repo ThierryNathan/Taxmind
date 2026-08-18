@@ -33,6 +33,7 @@ import {
   secaoDoRecibo,
   valorLiquido,
 } from "../_shared/export_contador.ts";
+import { rotuloTitulo } from "../_shared/rotulos.ts";
 
 type ExportRequest = {
   usuario_id: string;
@@ -67,7 +68,7 @@ const supabase = createClient(
 
 // Nomes de aba do Excel: maximo 31 caracteres, e sem : \ / ? * [ ].
 export const ABA_PAGAMENTOS = "Pagamentos Efetuados";
-export const ABA_LIVRO_CAIXA = "Possiveis deducoes Livro-Caixa";
+export const ABA_LIVRO_CAIXA = "Possíveis deduções Livro-Caixa";
 
 // A nota da aba de Livro-Caixa e o ponto inteiro da separacao: sem ela, um
 // assalariado leria a aba como deducao disponivel e declararia despesa que a
@@ -75,8 +76,8 @@ export const ABA_LIVRO_CAIXA = "Possiveis deducoes Livro-Caixa";
 // tabela, porque nota de rodape em planilha some assim que alguem ordena ou
 // filtra a faixa de dados.
 export const NOTA_LIVRO_CAIXA =
-  "Aplicavel apenas a quem recebe renda nao assalariada sujeita a carne-leao. " +
-  "Sujeito a limite de receita mensal, nao verificado por este sistema. " +
+  "Aplicável apenas a quem recebe renda não assalariada sujeita a carnê-leão. " +
+  "Sujeito a limite de receita mensal, não verificado por este sistema. " +
   "Confirme com seu contador antes de utilizar.";
 
 // Transporte sai por vedacao legal, nao por triagem nossa, e o contador precisa
@@ -84,27 +85,27 @@ export const NOTA_LIVRO_CAIXA =
 // o titular for representante comercial autonomo — a unica excecao do art. 68 —
 // e justamente ele quem perde deducao com o silencio.
 export const NOTA_TRANSPORTE_FORA =
-  "Despesas de transporte e locomocao nao entram nesta aba: o art. 68 do RIR/2018 " +
-  "veda a deducao no livro-caixa, exceto para representante comercial autonomo. " +
-  "Se for o seu caso, peca o dossie completo em PDF, que lista essas despesas.";
+  "Despesas de transporte e locomoção não entram nesta aba: o art. 68 do RIR/2018 " +
+  "veda a dedução no livro-caixa, exceto para representante comercial autônomo. " +
+  "Se for o seu caso, peça o dossiê completo em PDF, que lista essas despesas.";
 
 // A ficha "Pagamentos Efetuados" tambem tem limite que o sistema nao verifica —
 // educacao tem teto anual por pessoa. O valor do teto muda todo ano e por isso
 // nao aparece aqui: um numero desatualizado no arquivo seria pior do que a
 // remissao ao contador.
 export const NOTA_PAGAMENTOS =
-  "Saude nao tem limite de valor. Educacao tem limite anual por pessoa, nao verificado " +
-  "por este sistema — confira o teto do exercicio com seu contador.";
+  "Saúde não tem limite de valor. Educação tem limite anual por pessoa, não verificado " +
+  "por este sistema — confira o teto do exercício com seu contador.";
 
 export const CABECALHO_TABELA = [
   "Data",
-  "Descricao",
+  "Descrição",
   "Estabelecimento",
   "CPF/CNPJ do prestador",
   "Categoria",
   "Valor bruto (R$)",
   "Reembolso (R$)",
-  "Valor liquido (R$)",
+  "Valor líquido (R$)",
   "Dedutibilidade (TaxMind)",
   "Status (TaxMind)",
 ];
@@ -142,7 +143,7 @@ serve(async (request) => {
 
     const recibos = await fetchRecibos(usuarioId);
     const { bytes, totalPagamentos, totalLivroCaixa } = buildExportXlsx(
-      usuario.nome ?? "Usuario TaxMind",
+      usuario.nome ?? "Usuário TaxMind",
       recibos,
     );
 
@@ -272,7 +273,7 @@ export function buildExportXlsx(nome: string, recibos: ReciboRow[]) {
 
   const wb = XLSX.utils.book_new();
   wb.Props = {
-    Title: "TaxMind - Export para revisao contabil",
+    Title: "TaxMind - Export para revisão contábil",
     Author: "TaxMind",
   };
 
@@ -293,7 +294,7 @@ export function buildExportXlsx(nome: string, recibos: ReciboRow[]) {
     montarAba({
       nome,
       periodo,
-      titulo: "Possiveis deducoes via Livro-Caixa",
+      titulo: "Possíveis deduções via Livro-Caixa",
       notas: [NOTA_LIVRO_CAIXA, NOTA_TRANSPORTE_FORA],
       recibos: livroCaixa,
     }),
@@ -317,9 +318,9 @@ function montarAba(input: {
   recibos: ReciboRow[];
 }) {
   const linhas: unknown[][] = [
-    ["Preparado para revisao contabil"],
+    ["Preparado para revisão contábil"],
     [input.nome],
-    [`Periodo coberto: ${input.periodo}`],
+    [`Período coberto: ${input.periodo}`],
     [input.titulo],
     [],
   ];
@@ -369,7 +370,7 @@ function montarAba(input: {
   }
 
   if (input.recibos.length === 0) {
-    linhas.push(["Nenhuma despesa desta natureza no periodo."]);
+    linhas.push(["Nenhuma despesa desta natureza no período."]);
   } else {
     linhas.push([]);
     linhas.push([
@@ -377,7 +378,7 @@ function montarAba(input: {
       "",
       "",
       "",
-      `${input.recibos.length} lancamento(s)`,
+      `${input.recibos.length} lançamento(s)`,
       totalBruto,
       totalReembolso,
       totalLiquido,
@@ -454,16 +455,18 @@ function periodoCoberto(recibos: ReciboRow[]): string {
     .filter((d): d is Date => d instanceof Date)
     .sort((a, b) => a.getTime() - b.getTime());
 
-  if (datas.length === 0) return "sem lancamentos";
+  if (datas.length === 0) return "sem lançamentos";
 
   const inicio = formatDate(datas[0]);
   const fim = formatDate(datas[datas.length - 1]);
   return inicio === fim ? inicio : `${inicio} a ${fim}`;
 }
 
+// O rotulo em portugues correto vive em _shared/rotulos.ts, junto com o da
+// generate-dossier e o da followup-resolve: as tres rendiam o mesmo enum com a
+// mesma receita ASCII e entregavam "Saude"/"Revisao humana" ao contador.
 function humanize(value: string) {
-  if (!value) return "";
-  return value.charAt(0) + value.slice(1).toLowerCase().replaceAll("_", " ");
+  return rotuloTitulo(value);
 }
 
 function formatDate(date: Date) {
