@@ -38,6 +38,10 @@ export const CAPACIDADES_ANUNCIADAS = [
   "dossiê",
   "planilha",
   "contador",
+  // Fase 17: entrou aqui para o teste de espelho cobrar a mencao nos DOIS
+  // textos. A funcionalidade so existe se alguem descobrir que ela existe, e
+  // estes sao os dois unicos lugares onde isso acontece sem o usuario ja saber.
+  "declara",
 ] as const;
 
 export function mensagemBoasVindas(nome?: string | null): string {
@@ -52,6 +56,7 @@ export function mensagemBoasVindas(nome?: string | null): string {
     "4. Gero seu dossiê completo em PDF quando você manda 'dossiê'.",
     "5. Monto a planilha estruturada para o seu contador, já separada entre dedução pessoal e Livro-Caixa — é só pedir 'planilha'.",
     "6. Conecto sua conta bancária pelo Open Finance para importar transações — é só pedir 'conectar meu banco'.",
+    "7. Importo sua declaração do ano passado (o PDF do e-CAC) para comparar com o que você registrar este ano — é só pedir 'importar declaração anterior'.",
     // O mesmo cuidado do dossie e da confirmacao de despesa: deducao reduz a
     // BASE DE CALCULO, e a mensagem de boas-vindas e justamente onde a
     // expectativa de "dinheiro de volta" se forma.

@@ -562,6 +562,171 @@
         320
       ],
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-aguardando-declaracao",
+              "leftValue": "={{ $(\"Preparar Contexto\").item.json.followup_anterior_campo }}",
+              "rightValue": "declaracao_anterior",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "f17b0001-1a2b-4c3d-8e4f-b17000000001",
+      "name": "Aguardando Declaração?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        340,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/functions/v1/declaracao-import",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SECRET_KEY_SB_FORMAT }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ session_id: $(\"Preparar Contexto\").item.json.session_id, followup_id: $(\"Preparar Contexto\").item.json.followup_anterior_id, arquivo_base64: $json.base64_data, mime_type: $json.media_mime_type, arquivo_nome: $(\"Preparar Contexto\").item.json.media_filename }) }}",
+        "options": {}
+      },
+      "id": "f17b0002-1a2b-4c3d-8e4f-b17000000002",
+      "name": "Edge - Importar Declaração",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        620
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "cond-seguir-como-recibo",
+              "leftValue": "={{ $json.seguir_como_recibo }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "f17b0003-1a2b-4c3d-8e4f-b17000000003",
+      "name": "Não Era Declaração?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        780,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $(\"Preparar Contexto\").item.json.phone, type: \"text\", text: { body: $json.mensagem || \"Recebi seu arquivo, mas nao consegui process\\u00e1-lo agora. Tenta de novo em alguns minutos.\" } }) }}",
+        "options": {}
+      },
+      "id": "f17b0004-1a2b-4c3d-8e4f-b17000000004",
+      "name": "WhatsApp - Resultado da Declaração",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1000,
+        700
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $(\"Preparar Contexto\").item.json.phone, type: \"text\", text: { body: $json.mensagem } }) }}",
+        "options": {}
+      },
+      "id": "f17b0005-1a2b-4c3d-8e4f-b17000000005",
+      "name": "WhatsApp - Avisar Que Não Era Declaração",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1000,
+        520
+      ]
     }
   ],
   "pinData": {},
@@ -632,7 +797,7 @@
       "main": [
         [
           {
-            "node": "Gemini - Classificação Visual",
+            "node": "Aguardando Declaração?",
             "type": "main",
             "index": 0
           }
@@ -775,6 +940,58 @@
         [
           {
             "node": "WhatsApp - Pedir Valor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aguardando Declaração?": {
+      "main": [
+        [
+          {
+            "node": "Edge - Importar Declaração",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gemini - Classificação Visual",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edge - Importar Declaração": {
+      "main": [
+        [
+          {
+            "node": "Não Era Declaração?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Não Era Declaração?": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Avisar Que Não Era Declaração",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Gemini - Classificação Visual",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "WhatsApp - Resultado da Declaração",
             "type": "main",
             "index": 0
           }

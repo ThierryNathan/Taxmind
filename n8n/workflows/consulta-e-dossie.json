@@ -20,7 +20,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const body = $input.item.json.body;\nconst normalized = body.normalized || {};\nconst texto = normalized.text_body || \"\";\n\n// Anotacao de follow-up posta pela whatsapp-webhook (fase 13).\n// valor_detectado preenchido = esta mensagem E a resposta (documento com\n// digito verificador conferido). Preenchido so o id = ha pendencia aberta, mas\n// a mensagem nao parece resposta; quem decide se e evidencia nova em texto\n// livre e o classificador de intencao mais adiante.\nconst followup = body.followup || null;\n\n// Como a pergunta pendente e descrita para o classificador de intencao.\n//\n// Sem isto ele classificava toda resposta em texto livre como despesa nova —\n// \"foi na clinica vida\" e \"nao tenho o cnpj, foi consulta particular\" viravam\n// registro_despesa em 9 de 9 mensagens medidas contra o Gemini real. O modo\n// RECLASSIFICADO, que existe exatamente para essas frases, ficava inalcancavel:\n// so o intent \"outro\" chega nele.\n//\n// O texto so entra no prompt quando ha pendencia aberta, entao a classificacao\n// de quem nao tem pergunta pendente — a esmagadora maioria — continua byte a\n// byte a de antes.\nconst CONTEXTO_FOLLOWUP = {\n  documento_prestador: \"o CNPJ ou CPF do prestador de uma despesa que ele ja registrou\",\n  estabelecimento: \"onde foi uma despesa que ele ja registrou (o nome do estabelecimento)\",\n  valor_reembolso:\n    \"se uma despesa de saude que ele ja registrou foi reembolsada pelo plano, e de quanto foi esse reembolso\",\n};\n\n// O discriminador tambem muda com o campo, e essa parte NAO podia continuar\n// fixa no node do Gemini. O texto de identificacao termina com \"NAO use esta\n// categoria quando a mensagem trouxer o VALOR em dinheiro\": na pergunta de\n// reembolso o valor em dinheiro E a resposta certa, e a instrucao antiga\n// empurraria a resposta de volta para registro_despesa — o mesmo bug 9/9 da\n// fase anterior, com outra roupa.\nconst INSTRUCAO_FOLLOWUP = {\n  documento_prestador:\n    \"Vale mesmo quando ela so diz o nome do lugar, quem atendeu, o tipo de servico, ou que o usuario nao tem o dado — a despesa ja esta registrada e o que falta e apenas a identificacao. NAO use esta categoria quando a mensagem trouxer o VALOR em dinheiro de um gasto novo: isso e registro_despesa.\",\n  estabelecimento:\n    \"Vale mesmo quando ela so diz o nome do lugar, quem atendeu, o tipo de servico, ou que o usuario nao tem o dado — a despesa ja esta registrada e o que falta e apenas a identificacao. NAO use esta categoria quando a mensagem trouxer o VALOR em dinheiro de um gasto novo: isso e registro_despesa.\",\n  valor_reembolso:\n    \"Vale mesmo quando ela so diz que houve ou que nao houve reembolso, quanto o plano cobriu, ou que o usuario ainda vai descobrir — a despesa ja esta registrada e o que falta e so o reembolso. NAO use esta categoria quando a mensagem descrever um gasto NOVO, com estabelecimento ou servico proprio: isso e registro_despesa.\",\n};\n\n// Casa palavra-chave sem depender de acento nem de caixa.\nconst alvo = texto\n  .normalize(\"NFD\")\n  .replace(/[\\u0300-\\u036f]/g, \"\")\n  .toLowerCase();\n\nconst contem = (termos) => termos.some((t) => alvo.includes(t));\n\n// Precedencia: o dossie e checado antes do resumo de proposito. \"resumo\" e\n// palavra comum e apareceria em \"manda o resumo em pdf\", onde a intencao real\n// e o arquivo. Os termos de dossie sao mais especificos, entao ganham.\n//\n// Conectar banco vem antes de todos, mas exigindo DOIS eixos na mesma\n// mensagem: um verbo de conexao e um substantivo de conta/banco. Casar so\n// \"conta\" ou so \"banco\" roubaria \"me manda o resumo da minha conta\" e\n// \"quanto rende o CDB do meu banco\". O prefixo \"conect\"/\"vincul\" cobre as\n// conjugacoes (conecta, conectar, vincule) sem depender de adjacencia.\n// A guarda de \"desconect\"/\"desvincul\" existe porque \"conect\" casa dentro de\n// \"desconectar\": desconexao nao esta implementada e cai na IA.\nlet intent = null;\nif (contem([\"desconect\", \"desvincul\"])) {\n  intent = null;\n} else if (\n  contem([\"conect\", \"vincul\", \"sincroniz\", \"open finance\"]) &&\n  contem([\"banco\", \"conta\", \"bancari\", \"cartao\", \"open finance\"])\n) {\n  intent = \"conectar_banco\";\n} else if (\n  // Export estruturado para o contador, checado ANTES do dossie porque o\n  // branch de dossie casa \"exportar\" — e \"exportar para contador\" cairia nele.\n  //\n  // Dois caminhos, com riscos de falso positivo diferentes:\n  //\n  // 1. planilha/excel/xlsx sao inequivocos. Nao existe outra coisa no TaxMind\n  //    que seja uma planilha, entao a palavra sozinha basta.\n  //\n  // 2. \"contador\" sozinho NAO basta e nao pode bastar: \"manda o dossie pro meu\n  //    contador\" e pedido de dossie, e \"quanto paguei ao contador\" e consulta.\n  //    Por isso o segundo caminho exige um verbo de entrega junto E a AUSENCIA\n  //    de termo de dossie — quem citou PDF/dossie explicitamente ja disse qual\n  //    arquivo quer, e a mencao ao contador ali e o destinatario, nao o formato.\n  contem([\"planilha\", \"excel\", \"xlsx\"]) ||\n  (contem([\"contador\", \"contabil\"]) &&\n    contem([\"export\", \"envi\", \"mand\", \"gera\", \"prepar\", \"arquiv\", \"materi\"]) &&\n    !contem([\"dossie\", \"pdf\", \"relatorio\"]))\n) {\n  intent = \"export_contador\";\n} else if (contem([\"dossie\", \"relatorio\", \"pdf\", \"exportar\"])) {\n  intent = \"exportar_dossie\";\n} else if (contem([\"resumo\", \"extrato\", \"quanto tenho\"])) {\n  intent = \"consulta_resumo\";\n} else if (\n  // \"Quem e voce / o que voce faz\" cai por ultimo de proposito. As frases sao\n  // longas o bastante para nao roubar lancamento (\"comprei um robo\" nao contem\n  // \"voce e um robo\"), mas \"como funciona\" e generico: checado depois de\n  // dossie/resumo/banco, \"como funciona o dossie\" continua sendo pedido de\n  // dossie, que era o comportamento de antes. O classificador de IA cobre as\n  // formas que a lista nao preve.\n  contem([\n    \"quem e voce\",\n    \"quem e vc\",\n    \"quem e o taxmind\",\n    \"o que e o taxmind\",\n    \"o que e taxmind\",\n    \"sobre o taxmind\",\n    \"o que voce faz\",\n    \"o que vc faz\",\n    \"o que voce pode fazer\",\n    \"o que vc pode fazer\",\n    \"o que voce sabe fazer\",\n    \"o que da pra fazer\",\n    \"como voce funciona\",\n    \"como vc funciona\",\n    \"como funciona\",\n    \"pra que serve\",\n    \"para que serve\",\n    \"voce e um robo\",\n    \"vc e um robo\",\n    \"voce e uma ia\",\n    \"vc e uma ia\",\n  ])\n) {\n  intent = \"sobre_o_taxmind\";\n}\n\nreturn {\n  json: {\n    session_id: body.session_id || null,\n    message_type: normalized.message_type || null,\n    text_body: normalized.text_body || null,\n    wa_id: normalized.wa_id,\n    phone: normalized.phone,\n    profile_name: normalized.profile_name || null,\n    intent,\n    followup_id: followup ? followup.id : null,\n    followup_campo: followup ? followup.campo_alvo : null,\n    followup_valor_detectado: followup ? followup.valor_detectado : null,\n    followup_contexto: followup ? (CONTEXTO_FOLLOWUP[followup.campo_alvo] || null) : null,\n    followup_instrucao: followup ? (INSTRUCAO_FOLLOWUP[followup.campo_alvo] || null) : null,\n  },\n};"
+        "jsCode": "const body = $input.item.json.body;\nconst normalized = body.normalized || {};\nconst texto = normalized.text_body || \"\";\n\n// Anotacao de follow-up posta pela whatsapp-webhook (fase 13).\n// valor_detectado preenchido = esta mensagem E a resposta (documento com\n// digito verificador conferido). Preenchido so o id = ha pendencia aberta, mas\n// a mensagem nao parece resposta; quem decide se e evidencia nova em texto\n// livre e o classificador de intencao mais adiante.\nconst followup = body.followup || null;\n\n// Como a pergunta pendente e descrita para o classificador de intencao.\n//\n// Sem isto ele classificava toda resposta em texto livre como despesa nova —\n// \"foi na clinica vida\" e \"nao tenho o cnpj, foi consulta particular\" viravam\n// registro_despesa em 9 de 9 mensagens medidas contra o Gemini real. O modo\n// RECLASSIFICADO, que existe exatamente para essas frases, ficava inalcancavel:\n// so o intent \"outro\" chega nele.\n//\n// O texto so entra no prompt quando ha pendencia aberta, entao a classificacao\n// de quem nao tem pergunta pendente — a esmagadora maioria — continua byte a\n// byte a de antes.\nconst CONTEXTO_FOLLOWUP = {\n  documento_prestador: \"o CNPJ ou CPF do prestador de uma despesa que ele ja registrou\",\n  estabelecimento: \"onde foi uma despesa que ele ja registrou (o nome do estabelecimento)\",\n  valor_reembolso:\n    \"se uma despesa de saude que ele ja registrou foi reembolsada pelo plano, e de quanto foi esse reembolso\",\n};\n\n// O discriminador tambem muda com o campo, e essa parte NAO podia continuar\n// fixa no node do Gemini. O texto de identificacao termina com \"NAO use esta\n// categoria quando a mensagem trouxer o VALOR em dinheiro\": na pergunta de\n// reembolso o valor em dinheiro E a resposta certa, e a instrucao antiga\n// empurraria a resposta de volta para registro_despesa — o mesmo bug 9/9 da\n// fase anterior, com outra roupa.\nconst INSTRUCAO_FOLLOWUP = {\n  documento_prestador:\n    \"Vale mesmo quando ela so diz o nome do lugar, quem atendeu, o tipo de servico, ou que o usuario nao tem o dado — a despesa ja esta registrada e o que falta e apenas a identificacao. NAO use esta categoria quando a mensagem trouxer o VALOR em dinheiro de um gasto novo: isso e registro_despesa.\",\n  estabelecimento:\n    \"Vale mesmo quando ela so diz o nome do lugar, quem atendeu, o tipo de servico, ou que o usuario nao tem o dado — a despesa ja esta registrada e o que falta e apenas a identificacao. NAO use esta categoria quando a mensagem trouxer o VALOR em dinheiro de um gasto novo: isso e registro_despesa.\",\n  valor_reembolso:\n    \"Vale mesmo quando ela so diz que houve ou que nao houve reembolso, quanto o plano cobriu, ou que o usuario ainda vai descobrir — a despesa ja esta registrada e o que falta e so o reembolso. NAO use esta categoria quando a mensagem descrever um gasto NOVO, com estabelecimento ou servico proprio: isso e registro_despesa.\",\n};\n\n// Texto que pede o PDF da declaracao. Espelho de MENSAGEM_PEDIR_DECLARACAO\n// em supabase/functions/_shared/declaracao_anterior.ts; o caminho do e-CAC\n// citado nele foi conferido na documentacao da Receita, nao suposto.\n// tests/n8n_declaracao_test.ts compara os dois textos e falha se so um\n// lado mudar.\nconst PERGUNTA_DECLARACAO = \"Boa! Me manda o PDF da sua declaração do ano passado aqui no WhatsApp.\\n\\nOnde pegar, se você não tiver o arquivo à mão:\\n\\n1. Entre no e-CAC (cav.receita.fazenda.gov.br) com sua conta gov.br — precisa ser nível prata ou ouro.\\n2. Clique em *Meu Imposto de Renda*.\\n3. Em *Declaração do IRPF*, escolha o ano.\\n4. Em *Serviços Disponíveis*, clique em *Documentos e Arquivos (Cópia da Declaração)* e baixe o PDF.\\n\\nEu leio só a alíquota efetiva, se você usou desconto simplificado ou completa, e quais deduções apareceram. O arquivo não fica guardado — depois de ler, eu descarto e mantenho apenas esses números.\\n\\nTenho uma hora de janela. Se passar, é só pedir de novo.\";\n\n// Casa palavra-chave sem depender de acento nem de caixa.\nconst alvo = texto\n  .normalize(\"NFD\")\n  .replace(/[\\u0300-\\u036f]/g, \"\")\n  .toLowerCase();\n\nconst contem = (termos) => termos.some((t) => alvo.includes(t));\n\n// Precedencia: o dossie e checado antes do resumo de proposito. \"resumo\" e\n// palavra comum e apareceria em \"manda o resumo em pdf\", onde a intencao real\n// e o arquivo. Os termos de dossie sao mais especificos, entao ganham.\n//\n// Conectar banco vem antes de todos, mas exigindo DOIS eixos na mesma\n// mensagem: um verbo de conexao e um substantivo de conta/banco. Casar so\n// \"conta\" ou so \"banco\" roubaria \"me manda o resumo da minha conta\" e\n// \"quanto rende o CDB do meu banco\". O prefixo \"conect\"/\"vincul\" cobre as\n// conjugacoes (conecta, conectar, vincule) sem depender de adjacencia.\n// A guarda de \"desconect\"/\"desvincul\" existe porque \"conect\" casa dentro de\n// \"desconectar\": desconexao nao esta implementada e cai na IA.\nlet intent = null;\nif (contem([\"desconect\", \"desvincul\"])) {\n  intent = null;\n} else if (\n  contem([\"conect\", \"vincul\", \"sincroniz\", \"open finance\"]) &&\n  contem([\"banco\", \"conta\", \"bancari\", \"cartao\", \"open finance\"])\n) {\n  intent = \"conectar_banco\";\n} else if (\n  // Export estruturado para o contador, checado ANTES do dossie porque o\n  // branch de dossie casa \"exportar\" — e \"exportar para contador\" cairia nele.\n  //\n  // Dois caminhos, com riscos de falso positivo diferentes:\n  //\n  // 1. planilha/excel/xlsx sao inequivocos. Nao existe outra coisa no TaxMind\n  //    que seja uma planilha, entao a palavra sozinha basta.\n  //\n  // 2. \"contador\" sozinho NAO basta e nao pode bastar: \"manda o dossie pro meu\n  //    contador\" e pedido de dossie, e \"quanto paguei ao contador\" e consulta.\n  //    Por isso o segundo caminho exige um verbo de entrega junto E a AUSENCIA\n  //    de termo de dossie — quem citou PDF/dossie explicitamente ja disse qual\n  //    arquivo quer, e a mencao ao contador ali e o destinatario, nao o formato.\n  contem([\"planilha\", \"excel\", \"xlsx\"]) ||\n  (contem([\"contador\", \"contabil\"]) &&\n    contem([\"export\", \"envi\", \"mand\", \"gera\", \"prepar\", \"arquiv\", \"materi\"]) &&\n    !contem([\"dossie\", \"pdf\", \"relatorio\"]))\n) {\n  intent = \"export_contador\";\n} else if (\n  // Import da declaracao do ano anterior (fase 17). Dois eixos na mesma\n  // mensagem, mesmo padrao do conectar_banco: um substantivo de declaracao e um\n  // qualificador de trazer ou de outro ano.\n  //\n  // So \"declaracao\" NAO pode bastar, e as frases que provam isso sao comuns:\n  // \"isso entra na minha declaracao?\" e pergunta fiscal, \"quanto vou pagar na\n  // declaracao\" e consulta. As duas tem o substantivo e nenhuma e um pedido de\n  // import.\n  //\n  // O eixo temporal (\"anterior\", \"passado\", \"retrasado\") entra junto com os\n  // verbos porque \"declaracao do ano passado\" ja e um pedido completo sem\n  // nenhum verbo. Ano em quatro digitos ficou de FORA de proposito: casaria\n  // \"quanto vou pagar na declaracao de 2026\", que e consulta, e o ganho seria\n  // so cobrir \"declaracao de 2025\" — que o classificador de IA pega.\n  contem([\"declaracao\", \"irpf do ano\", \"ir do ano\"]) &&\n  contem([\n    \"importar\", \"importa\", \"import\", \"enviar\", \"envie\", \"envio\", \"mandar\",\n    \"mando\", \"anexar\", \"anterior\", \"passado\", \"retrasado\",\n  ])\n) {\n  intent = \"importar_declaracao\";\n} else if (contem([\"dossie\", \"relatorio\", \"pdf\", \"exportar\"])) {\n  intent = \"exportar_dossie\";\n} else if (contem([\"resumo\", \"extrato\", \"quanto tenho\"])) {\n  intent = \"consulta_resumo\";\n} else if (\n  // \"Quem e voce / o que voce faz\" cai por ultimo de proposito. As frases sao\n  // longas o bastante para nao roubar lancamento (\"comprei um robo\" nao contem\n  // \"voce e um robo\"), mas \"como funciona\" e generico: checado depois de\n  // dossie/resumo/banco, \"como funciona o dossie\" continua sendo pedido de\n  // dossie, que era o comportamento de antes. O classificador de IA cobre as\n  // formas que a lista nao preve.\n  contem([\n    \"quem e voce\",\n    \"quem e vc\",\n    \"quem e o taxmind\",\n    \"o que e o taxmind\",\n    \"o que e taxmind\",\n    \"sobre o taxmind\",\n    \"o que voce faz\",\n    \"o que vc faz\",\n    \"o que voce pode fazer\",\n    \"o que vc pode fazer\",\n    \"o que voce sabe fazer\",\n    \"o que da pra fazer\",\n    \"como voce funciona\",\n    \"como vc funciona\",\n    \"como funciona\",\n    \"pra que serve\",\n    \"para que serve\",\n    \"voce e um robo\",\n    \"vc e um robo\",\n    \"voce e uma ia\",\n    \"vc e uma ia\",\n  ])\n) {\n  intent = \"sobre_o_taxmind\";\n}\n\nreturn {\n  json: {\n    session_id: body.session_id || null,\n    message_type: normalized.message_type || null,\n    text_body: normalized.text_body || null,\n    wa_id: normalized.wa_id,\n    phone: normalized.phone,\n    profile_name: normalized.profile_name || null,\n    intent,\n    pergunta_declaracao: PERGUNTA_DECLARACAO,\n    followup_id: followup ? followup.id : null,\n    followup_campo: followup ? followup.campo_alvo : null,\n    followup_valor_detectado: followup ? followup.valor_detectado : null,\n    followup_contexto: followup ? (CONTEXTO_FOLLOWUP[followup.campo_alvo] || null) : null,\n    followup_instrucao: followup ? (INSTRUCAO_FOLLOWUP[followup.campo_alvo] || null) : null,\n  },\n};"
       },
       "id": "4dab695c-0642-40c3-a3b8-745cfa43fdc8",
       "name": "Preparar Contexto",
@@ -152,7 +152,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ contents: [ { role: \"user\", parts: [ { text: \"Classifique a mensagem do usuario em exatamente uma destas categorias:\\n\\nregistro_despesa: o usuario esta informando uma despesa que fez.\\nconsulta_resumo: o usuario quer ver o proprio historico ou os totais ja registrados.\\nexportar_dossie: o usuario quer o relatorio ou o PDF das despesas dele.\\nexport_contador: o usuario quer a planilha, o Excel ou o material estruturado para entregar ao contador dele. Diferenca para exportar_dossie: dossie e o relatorio em PDF para o proprio usuario ler; export_contador e a planilha de trabalho para o contador. Se a mensagem citar planilha ou Excel, e export_contador; se citar PDF ou dossie, e exportar_dossie.\\nconectar_banco: o usuario quer conectar, vincular ou sincronizar uma conta bancaria, um cartao ou o Open Finance ao TaxMind para importar transacoes automaticamente.\\nsobre_o_taxmind: o usuario quer saber quem voce e, o que o TaxMind faz, como o servico funciona ou para que ele serve.\\nfora_do_escopo_financeiro: a mensagem trata de dinheiro, financas, investimento, credito, juros, emprestimo ou planejamento financeiro em geral, mas NAO e uma despesa a registrar nem uma consulta ao historico dele.\\noutro: qualquer coisa que nao se encaixe nas categorias acima.\\n\" + ($json.followup_contexto ? \"resposta_de_followup: o TaxMind acabou de perguntar ao usuario \" + $json.followup_contexto + \", e esta mensagem responde a essa pergunta. \" + $json.followup_instrucao + \"\\n\" : \"\") + \"\\nResponda APENAS a categoria, sem explicacao.\\n\\nMensagem: \" + ($json.text_body || \"\") } ] } ], generationConfig: { temperature: 0, maxOutputTokens: 512, thinkingConfig: { thinkingLevel: \"low\" } } }) }}",
+        "jsonBody": "={{ JSON.stringify({ contents: [ { role: \"user\", parts: [ { text: \"Classifique a mensagem do usuario em exatamente uma destas categorias:\\n\\nregistro_despesa: o usuario esta informando uma despesa que fez.\\nconsulta_resumo: o usuario quer ver o proprio historico ou os totais ja registrados.\\nexportar_dossie: o usuario quer o relatorio ou o PDF das despesas dele.\\nexport_contador: o usuario quer a planilha, o Excel ou o material estruturado para entregar ao contador dele. Diferenca para exportar_dossie: dossie e o relatorio em PDF para o proprio usuario ler; export_contador e a planilha de trabalho para o contador. Se a mensagem citar planilha ou Excel, e export_contador; se citar PDF ou dossie, e exportar_dossie.\\nimportar_declaracao: o usuario quer ENVIAR ao TaxMind a declaracao de IRPF de um ano anterior, para servir de base de comparacao. Vale tambem quando ele so avisa que tem o PDF da declaracao passada em maos. NAO use quando a mensagem for sobre o CONTEUDO da declaracao (o que declarar, quanto vai pagar, se algo entra nela): isso e consulta.\\nconectar_banco: o usuario quer conectar, vincular ou sincronizar uma conta bancaria, um cartao ou o Open Finance ao TaxMind para importar transacoes automaticamente.\\nsobre_o_taxmind: o usuario quer saber quem voce e, o que o TaxMind faz, como o servico funciona ou para que ele serve.\\nfora_do_escopo_financeiro: a mensagem trata de dinheiro, financas, investimento, credito, juros, emprestimo ou planejamento financeiro em geral, mas NAO e uma despesa a registrar nem uma consulta ao historico dele.\\noutro: qualquer coisa que nao se encaixe nas categorias acima.\\n\" + ($json.followup_contexto ? \"resposta_de_followup: o TaxMind acabou de perguntar ao usuario \" + $json.followup_contexto + \", e esta mensagem responde a essa pergunta. \" + $json.followup_instrucao + \"\\n\" : \"\") + \"\\nResponda APENAS a categoria, sem explicacao.\\n\\nMensagem: \" + ($json.text_body || \"\") } ] } ], generationConfig: { temperature: 0, maxOutputTokens: 512, thinkingConfig: { thinkingLevel: \"low\" } } }) }}",
         "options": {}
       },
       "id": "05d3285b-ebcb-47f2-98da-6cc4d73c5f10",
@@ -167,7 +167,7 @@
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const ctx = $('Montar Contexto').item.json;\nconst resposta = $input.item.json;\n\nconst bruto = ((((resposta || {}).candidates || [])[0] || {}).content?.parts?.[0]?.text || \"\")\n  .toLowerCase()\n  .replace(/[^a-z_]/g, \"\");\n\n// \"outro\" fica por ultimo de proposito: e o fallback, e find() retorna o\n// primeiro match. As categorias especificas precisam ser testadas antes.\nconst validos = [\n  \"registro_despesa\",\n  \"consulta_resumo\",\n  \"exportar_dossie\",\n  \"export_contador\",\n  \"conectar_banco\",\n  \"resposta_de_followup\",\n  \"fora_do_escopo_financeiro\",\n  \"sobre_o_taxmind\",\n  \"outro\",\n];\n\n// Gemini 3 Flash nao permite desligar thinking (so thinkingLevel minimal/low/\n// medium/high). Se o thinking consumir o maxOutputTokens, o texto volta vazio.\n// Cair em \"outro\" mantem o fluxo vivo com a mensagem de ajuda, em vez de\n// derrubar a execucao com intent indefinido.\nconst intent = validos.find((v) => bruto.includes(v)) || \"outro\";\n\nreturn { json: { ...ctx, intent } };"
+        "jsCode": "const ctx = $('Montar Contexto').item.json;\nconst resposta = $input.item.json;\n\nconst bruto = ((((resposta || {}).candidates || [])[0] || {}).content?.parts?.[0]?.text || \"\")\n  .toLowerCase()\n  .replace(/[^a-z_]/g, \"\");\n\n// \"outro\" fica por ultimo de proposito: e o fallback, e find() retorna o\n// primeiro match. As categorias especificas precisam ser testadas antes.\nconst validos = [\n  \"registro_despesa\",\n  \"consulta_resumo\",\n  \"exportar_dossie\",\n  \"export_contador\",\n  \"importar_declaracao\",\n  \"conectar_banco\",\n  \"resposta_de_followup\",\n  \"fora_do_escopo_financeiro\",\n  \"sobre_o_taxmind\",\n  \"outro\",\n];\n\n// Gemini 3 Flash nao permite desligar thinking (so thinkingLevel minimal/low/\n// medium/high). Se o thinking consumir o maxOutputTokens, o texto volta vazio.\n// Cair em \"outro\" mantem o fluxo vivo com a mensagem de ajuda, em vez de\n// derrubar a execucao com intent indefinido.\nconst intent = validos.find((v) => bruto.includes(v)) || \"outro\";\n\nreturn { json: { ...ctx, intent } };"
       },
       "id": "9bca16a9-eff6-49b1-bd6c-3e78cd65fdb4",
       "name": "Aplicar Intent da IA",
@@ -397,6 +397,30 @@
               },
               "renameOutput": true,
               "outputKey": "export_contador"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "id": "cond-intent-importar-declaracao",
+                    "leftValue": "={{ $json.intent }}",
+                    "rightValue": "importar_declaracao",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "importar_declaracao"
             }
           ]
         },
@@ -506,7 +530,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $json.phone, type: \"text\", text: { body: $json.mensagem } }) }}",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $(\"Montar Contexto\").item.json.phone, type: \"text\", text: { body: [$(\"Formatar Resumo\").item.json.mensagem].concat(Array.isArray($json.linhas) ? $json.linhas : []).join(\"\\n\\n\") } }) }}",
         "options": {}
       },
       "id": "2c5dcead-c99c-472e-b56c-ac1ac37f44ae",
@@ -889,7 +913,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $json.phone, type: \"text\", text: { body: \"Sou o TaxMind, seu copiloto fiscal aqui no WhatsApp.\\n\\nO que eu faço:\\n\\n1. Registro suas despesas — manda a foto do cupom ou escreve por texto (ex.: 'dentista 500').\\n\\n2. Classifico cada uma quanto à dedutibilidade no IRPF e separo o que precisa de revisão.\\n\\n3. Mostro seu resumo fiscal quando você manda 'resumo'.\\n\\n4. Gero seu dossiê em PDF quando você manda 'dossiê'.\\n\\n5. Conecto sua conta bancária pelo Open Finance para importar transações — é só pedir 'conectar meu banco'.\\n\\n6. Monto a planilha estruturada para o seu contador, já separada entre dedução pessoal e Livro-Caixa — é só pedir 'planilha'.\\n\\nEu não substituo seu contador: organizo a evidência e a trilha de auditoria para ele revisar.\" } }) }}",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $json.phone, type: \"text\", text: { body: \"Sou o TaxMind, seu copiloto fiscal aqui no WhatsApp.\\n\\nO que eu faço:\\n\\n1. Registro suas despesas — manda a foto do cupom ou escreve por texto (ex.: 'dentista 500').\\n\\n2. Classifico cada uma quanto à dedutibilidade no IRPF e separo o que precisa de revisão.\\n\\n3. Mostro seu resumo fiscal quando você manda 'resumo'.\\n\\n4. Gero seu dossiê em PDF quando você manda 'dossiê'.\\n\\n5. Conecto sua conta bancária pelo Open Finance para importar transações — é só pedir 'conectar meu banco'.\\n\\n6. Monto a planilha estruturada para o seu contador, já separada entre dedução pessoal e Livro-Caixa — é só pedir 'planilha'.\\n\\n7. Importo sua declaração do ano passado (o PDF do e-CAC) e uso como base de comparação no seu resumo — é só pedir 'importar declaração anterior'.\\n\\nEu não substituo seu contador: organizo a evidência e a trilha de auditoria para ele revisar.\" } }) }}",
         "options": {}
       },
       "id": "e7c41d92-6b05-4a17-9f83-2d0c8e5b7a14",
@@ -1029,6 +1053,107 @@
         -400,
         1240
       ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/rpc/registrar_followup_pendente",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SERVICE_ROLE_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ p_usuario_id: $json.usuario_id, p_recibo_id: null, p_sessao_whatsapp_id: $json.session_id, p_campo_alvo: \"declaracao_anterior\", p_pergunta: $json.pergunta_declaracao, p_ttl_minutos: 60, p_mensagens: 5 }) }}",
+        "options": {}
+      },
+      "id": "f17a0001-1a2b-4c3d-8e4f-a17000000001",
+      "name": "Supabase - Abrir Pendência de Declaração",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -820,
+        1560
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.WHATSAPP_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $(\"Montar Contexto\").item.json.phone, type: \"text\", text: { preview_url: false, body: $(\"Montar Contexto\").item.json.pergunta_declaracao } }) }}",
+        "options": {}
+      },
+      "id": "f17a0002-1a2b-4c3d-8e4f-a17000000002",
+      "name": "WhatsApp - Pedir Declaração",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -600,
+        1560
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/functions/v1/declaracao-resumo",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SECRET_KEY_SB_FORMAT }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ usuario_id: $(\"Montar Contexto\").item.json.usuario_id }) }}",
+        "options": {}
+      },
+      "id": "f17a0003-1a2b-4c3d-8e4f-a17000000003",
+      "name": "Edge - Complemento do Resumo",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -160,
+        460
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
     }
   ],
   "pinData": {},
@@ -1181,6 +1306,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Supabase - Abrir Pendência de Declaração",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1199,7 +1331,7 @@
       "main": [
         [
           {
-            "node": "WhatsApp - Enviar Resumo",
+            "node": "Edge - Complemento do Resumo",
             "type": "main",
             "index": 0
           }
@@ -1316,6 +1448,28 @@
         [
           {
             "node": "WhatsApp - Enviar Falha do Export",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase - Abrir Pendência de Declaração": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Pedir Declaração",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edge - Complemento do Resumo": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Enviar Resumo",
             "type": "main",
             "index": 0
           }

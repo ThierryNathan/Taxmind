@@ -530,14 +530,18 @@ Deno.test("sem pendencia, o prompt do classificador e o mesmo de antes", async (
   };
 
   const mensagem = { text_body: "foi na clinica vida" };
-  // A categoria sobre_o_taxmind entrou nesta mesma sessao (item 1.3), e
-  // export_contador entrou na fase do export estruturado. As duas sao adicoes
-  // deliberadas ao prompt base, entao a comparacao ignora essas linhas e cobra
-  // o resto: qualquer OUTRA deriva continua quebrando o teste.
+  // A categoria sobre_o_taxmind entrou nesta mesma sessao (item 1.3),
+  // export_contador entrou na fase do export estruturado e importar_declaracao
+  // na fase 17. As tres sao adicoes deliberadas ao prompt base, entao a
+  // comparacao ignora essas linhas e cobra o resto: qualquer OUTRA deriva
+  // continua quebrando o teste.
   const semLinhaNova = (texto: string) =>
     texto
       .split("\n")
-      .filter((l) => !l.startsWith("sobre_o_taxmind:") && !l.startsWith("export_contador:"))
+      .filter((l) =>
+        !l.startsWith("sobre_o_taxmind:") && !l.startsWith("export_contador:") &&
+        !l.startsWith("importar_declaracao:")
+      )
       .join("\n");
 
   assertEquals(

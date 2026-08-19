@@ -35,9 +35,28 @@ export const CAMPOS_FOLLOWUP = ["documento_prestador", "estabelecimento"] as con
  *  usuario sabe, e que nenhuma evidencia de compra carrega. */
 export const CAMPO_REEMBOLSO = "valor_reembolso";
 
-export type CampoFollowup = typeof CAMPOS_FOLLOWUP[number] | typeof CAMPO_REEMBOLSO;
+/** Import da declaracao do ano anterior (Fase 17). Nao pertence a NENHUM
+ *  recibo: e a unica pendencia cuja resposta e um arquivo, e a unica que nasce
+ *  de um pedido explicito do usuario em vez de uma lacuna que a IA achou.
+ *
+ *  Entra aqui, e so aqui, porque campoRespondivel e o que a whatsapp-webhook
+ *  usa para decidir se conhece a pendencia — sem isto ela descartaria toda
+ *  pendencia de declaracao com motivo CAMPO_DESCONHECIDO, que foi exatamente o
+ *  incidente da Fase 15 (docs/09). O texto da pergunta, o TTL e o orcamento
+ *  ficam em _shared/declaracao_anterior.ts: nada aqui muda para os tres campos
+ *  de recibo, e derivarCampoFollowup continua sem conhece-lo. */
+export const CAMPO_DECLARACAO_ANTERIOR = "declaracao_anterior";
 
-const CAMPOS_RESPONDIVEIS: readonly string[] = [...CAMPOS_FOLLOWUP, CAMPO_REEMBOLSO];
+export type CampoFollowup =
+  | typeof CAMPOS_FOLLOWUP[number]
+  | typeof CAMPO_REEMBOLSO
+  | typeof CAMPO_DECLARACAO_ANTERIOR;
+
+const CAMPOS_RESPONDIVEIS: readonly string[] = [
+  ...CAMPOS_FOLLOWUP,
+  CAMPO_REEMBOLSO,
+  CAMPO_DECLARACAO_ANTERIOR,
+];
 
 export function campoRespondivel(campo: unknown): campo is CampoFollowup {
   return typeof campo === "string" && CAMPOS_RESPONDIVEIS.includes(campo);
@@ -256,6 +275,9 @@ export function extrairRespostaDeCampo(
   texto: string | null | undefined,
 ): string | null {
   if (campo === CAMPO_REEMBOLSO) return serializarRespostaReembolso(texto);
+  // declaracao_anterior cai neste return: a resposta dela e um ARQUIVO, e
+  // nenhuma frase deve fechar a pendencia. Quem a resolve e a
+  // declaracao-import, depois de ler o PDF.
   if (campo !== "documento_prestador") return null;
   return extrairDocumento(texto);
 }

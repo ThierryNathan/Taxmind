@@ -301,13 +301,17 @@ Deno.test("sem pendencia, o prompt do classificador continua o de antes", async 
   const anterior = JSON.parse(new TextDecoder().decode(stdout));
 
   const mensagem = { text_body: "me manda o resumo" };
-  // export_contador e uma adicao deliberada ao prompt base (fase do export
-  // estruturado): a linha e ignorada, e o resto do prompt continua tendo que
-  // bater byte a byte com o commitado. O que este teste protege nao e a
-  // imutabilidade do prompt, e sim que o caminho SEM pendencia nao ganhe nada
-  // do maquinario de follow-up — e isso e cobrado logo abaixo.
+  // export_contador (fase do export estruturado) e importar_declaracao (fase 17)
+  // sao adicoes deliberadas ao prompt base: as linhas sao ignoradas, e o resto
+  // do prompt continua tendo que bater byte a byte com o commitado. O que este
+  // teste protege nao e a imutabilidade do prompt, e sim que o caminho SEM
+  // pendencia nao ganhe nada do maquinario de follow-up — e isso e cobrado
+  // logo abaixo.
   const semLinhaNova = (texto: string) =>
-    texto.split("\n").filter((l) => !l.startsWith("export_contador:")).join("\n");
+    texto
+      .split("\n")
+      .filter((l) => !l.startsWith("export_contador:") && !l.startsWith("importar_declaracao:"))
+      .join("\n");
 
   assertEquals(
     semLinhaNova(promptDe(CONSULTA, mensagem)),
