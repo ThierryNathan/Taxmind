@@ -22,7 +22,9 @@ import {
   DECLARACAO_TTL_MINUTOS,
   estimarEconomia,
   interpretarExtracao,
+  mensagemDeclaracaoImportada,
   MENSAGEM_PEDIR_DECLARACAO,
+  rotuloAnoDeclaracao,
 } from "../supabase/functions/_shared/declaracao_anterior.ts";
 import { campoRespondivel, extrairRespostaDeCampo } from "../supabase/functions/_shared/followup.ts";
 
@@ -89,6 +91,18 @@ Deno.test("a instrucao cita o caminho real do e-CAC, com nome de menu", () => {
   // E o aviso de que o arquivo nao fica guardado: o PDF traz renda, bens e
   // dependentes, e a pessoa decide enviar sabendo disso.
   assert(/n[ãa]o fica guardado/i.test(MENSAGEM_PEDIR_DECLARACAO));
+});
+
+Deno.test("a instrucao tem saida para quem nao acha Meu Imposto de Renda", () => {
+  // O menu novo do e-CAC nem sempre mostra a opcao, e sem esta linha o passo a
+  // passo termina em beco sem saida logo no passo 2 — a pessoa nao tem como
+  // saber que existe outro layout com o mesmo item.
+  assert(
+    /vers[ãa]o cl[áa]ssica/i.test(MENSAGEM_PEDIR_DECLARACAO),
+    "falta a alternativa da versao classica do e-CAC",
+  );
+  // E precisa dizer ONDE trocar, senao a alternativa nao e seguivel.
+  assert(/canto da tela/i.test(MENSAGEM_PEDIR_DECLARACAO), "falta onde fica o botao");
 });
 
 // --- 2. palavra-chave e posicao do branch -----------------------------------
@@ -228,7 +242,81 @@ Deno.test("o complemento do resumo entra sem quebrar o resumo existente", () => 
   // E o envio tolera a ausencia de linhas.
   const envio: string = node(CONSULTA, "WhatsApp - Enviar Resumo").parameters.jsonBody;
   assert(envio.includes("Array.isArray($json.linhas)"), "o envio precisa tolerar complemento vazio");
-  assert(envio.includes('$("Formatar Resumo").item.json.mensagem'));
+  assert(envio.includes('$("Formatar Resumo").first().json.mensagem'));
+});
+
+// --- 3b. paired item no ramo do resumo (fase 18) ----------------------------
+
+Deno.test("nenhum node depois do Formatar Resumo usa .item", () => {
+  // O BUG QUE ISTO IMPEDE
+  //
+  // Formatar Resumo agrega N linhas da RPC em UMA mensagem. Code node em
+  // runOnceForAllItems nao declara paired item sozinho, e o n8n so consegue
+  // adivinhar a origem quando a entrada tem UM item. Enquanto o envio vinha
+  // logo depois do Code node isso nao aparecia (ele usava $json). A fase 17
+  // meteu o complemento da declaracao no meio e trocou $json por
+  // $("...").item — e a partir de DUAS categorias de despesa o resumo passou a
+  // morrer com "Paired item data for item from node 'Formatar Resumo' is
+  // unavailable", sem nenhuma mensagem chegando ao usuario.
+  //
+  // Medido no n8n 1.99.1 real: 1 categoria passava, 3 categorias nao.
+  for (const nome of ["Edge - Complemento do Resumo", "WhatsApp - Enviar Resumo"]) {
+    const corpo: string = node(CONSULTA, nome).parameters.jsonBody;
+    assert(
+      !/\$\("[^"]+"\)\.item/.test(corpo),
+      `${nome} usa .item, que nao resolve depois de um node que agrega`,
+    );
+  }
+});
+
+Deno.test("Formatar Resumo declara paired item nas duas saidas", () => {
+  // Defesa em profundidade, e ela e carregada de verdade: com o pairedItem
+  // declarado, o ramo volta a funcionar MESMO com .item nas expressoes
+  // (verificado por mutacao contra o n8n real). Sem ele, so o .first() segura.
+  const js: string = node(CONSULTA, "Formatar Resumo").parameters.jsCode;
+  assert(js.includes("const pairedItem = entrada.map("), "falta a declaracao de pairedItem");
+  assertEquals(
+    js.split("pairedItem,").length - 1,
+    2,
+    "os dois returns (lista vazia e resumo montado) precisam declarar pairedItem",
+  );
+});
+
+Deno.test("toda falha do ramo do resumo tem resposta ao usuario", () => {
+  // Fail open, mesmo padrao do resto do projeto: o comando "resumo" nunca pode
+  // terminar em silencio. Sao tres pontos de falha, e os tres desaguam no mesmo
+  // aviso.
+  const FALLBACK = "WhatsApp - Enviar Falha do Resumo";
+  assert(node(CONSULTA, FALLBACK), "falta o node de aviso de falha");
+
+  // 1. RPC fora do ar: volta pela saida NORMAL (alwaysOutputData continua
+  //    necessario para o [] legitimo, e uma saida de erro separada faria o
+  //    mesmo erro sair pelos dois lados, contradizendo a si mesmo).
+  const rpc = node(CONSULTA, "Supabase - RPC Resumo Fiscal");
+  assertEquals(rpc.onError, "continueRegularOutput");
+  assertEquals(rpc.alwaysOutputData, true);
+  assertEquals(CONSULTA.connections["Supabase - RPC Resumo Fiscal"].main.length, 1);
+  assert(
+    node(CONSULTA, "Formatar Resumo").parameters.jsCode.includes("l.error !== undefined"),
+    "Formatar Resumo precisa distinguir RPC quebrada de lista vazia",
+  );
+
+  // 2. Formatar Resumo lanca (inclusive pela linha acima) e 3. o envio falha.
+  for (const origem of ["Formatar Resumo", "WhatsApp - Enviar Resumo"]) {
+    assertEquals(node(CONSULTA, origem).onError, "continueErrorOutput", origem);
+    const saidas = CONSULTA.connections[origem].main;
+    assertEquals(
+      saidas[saidas.length - 1].map((d: any) => d.node),
+      [FALLBACK],
+      `a saida de erro de ${origem} precisa chegar ao aviso`,
+    );
+  }
+
+  // O aviso e a ultima linha de defesa: nao pode depender de paired item, que e
+  // exatamente o que falhou no ramo normal.
+  const corpo: string = node(CONSULTA, FALLBACK).parameters.jsonBody;
+  assert(!/\$\("[^"]+"\)\.item/.test(corpo), "o aviso de falha nao pode usar .item");
+  assert(/n[ãa]o consegui/i.test(corpo), "o aviso precisa dizer que o resumo nao saiu");
 });
 
 // --- 4. campo na infraestrutura de follow-up --------------------------------
@@ -357,6 +445,68 @@ Deno.test("a estimativa sempre carrega a ressalva de dado historico", () => {
   assert(estimativa, "deveria haver estimativa");
   assert(/estimativa/i.test(estimativa!), estimativa!);
   assert(/n[ãa]o [ée] uma garantia|n[ãa]o uma garantia/i.test(estimativa!), estimativa!);
+});
+
+Deno.test("todo ano de declaracao aparece com ano-calendario E exercicio", () => {
+  // "Declaracao de 2025" e ambiguo: pode ser o ano dos gastos ou o ano da
+  // entrega. E a mesma ambiguidade que faz o simulador oficial da Receita
+  // devolver a tabela do ano errado (AGENTS.md, secao do calculo do IRPF), e
+  // aqui ela levaria a pessoa a achar que importamos o arquivo errado.
+  assertEquals(rotuloAnoDeclaracao(2025), "ano-calendário 2025, exercício 2026");
+
+  const cenarios: string[][] = [
+    // 1. estimativa com economia > 0
+    complementoDoResumo(
+      {
+        ano_calendario: 2025,
+        aliquota_efetiva: 11.74,
+        rendimentos_tributaveis: null,
+        base_calculo: null,
+        categorias_pagamentos: ["EDUCACAO"],
+      },
+      [],
+      2000,
+    ),
+    // 2. quem ja estava isento
+    complementoDoResumo(
+      {
+        ano_calendario: 2025,
+        aliquota_efetiva: 0,
+        rendimentos_tributaveis: 30000,
+        base_calculo: 24000,
+        categorias_pagamentos: [],
+      },
+      [],
+      2000,
+    ),
+  ];
+
+  for (const linhas of cenarios) {
+    assert(linhas.length > 0);
+    for (const linha of linhas) {
+      // Nenhuma linha pode citar o ano sozinho.
+      assert(
+        !/(declaração|em) (de )?20\d\d(?!\d)/.test(linha.replace(/ano-calendário 20\d\d/g, "")) ||
+          linha.includes("exercício"),
+        `ano solto na linha: ${linha}`,
+      );
+      if (/20\d\d/.test(linha)) {
+        assert(linha.includes("ano-calendário"), `falta ano-calendario: ${linha}`);
+        assert(linha.includes("exercício"), `falta exercicio: ${linha}`);
+      }
+    }
+  }
+
+  // E a confirmacao do import, que e onde a pessoa confere contra o PDF.
+  const confirmacao = mensagemDeclaracaoImportada({
+    ...RESPOSTA_OK,
+    modelo: "SIMPLIFICADO",
+    confianca: "ALTA",
+  } as never);
+  assert(
+    confirmacao.includes("ano-calendário 2025, exercício 2026"),
+    confirmacao.split("\n")[0],
+  );
 });
 
 Deno.test("categoriasSemRegistroEsteAno so acompanha saude e educacao", () => {

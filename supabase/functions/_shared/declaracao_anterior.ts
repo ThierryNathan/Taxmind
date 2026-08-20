@@ -78,6 +78,8 @@ export const MENSAGEM_PEDIR_DECLARACAO = [
   "Onde pegar, se você não tiver o arquivo à mão:",
   "1. Entre no e-CAC (cav.receita.fazenda.gov.br) com sua conta gov.br — precisa ser nível prata ou ouro.\n" +
   "2. Clique em *Meu Imposto de Renda*.\n" +
+  "   Não achou essa opção? No canto da tela tem um botão para trocar para a " +
+  "*versão clássica* do e-CAC — nela o *Meu Imposto de Renda* aparece.\n" +
   "3. Em *Declaração do IRPF*, escolha o ano.\n" +
   "4. Em *Serviços Disponíveis*, clique em *Documentos e Arquivos (Cópia da Declaração)* e baixe o PDF.",
   "Eu leio só a alíquota efetiva, se você usou desconto simplificado ou completa, e quais deduções apareceram. " +
@@ -284,11 +286,31 @@ function naoNegativoOuNulo(valor: unknown): number | null {
   return n !== null && n >= 0 ? n : null;
 }
 
+/**
+ * Como o ano de uma declaracao aparece para o usuario: SEMPRE os dois numeros.
+ *
+ * "Declaracao de 2025" e ambiguo e a ambiguidade nao e teorica — e a mesma que
+ * derruba o simulador oficial da Receita, onde a aba mensal pergunta
+ * "Ano-calendario" e a anual pergunta "Exercicio", as duas batem no mesmo
+ * endpoint, e quem le um numero solto puxa a tabela do ano errado sem nenhum
+ * sintoma (o caso esta escrito em AGENTS.md, secao do calculo do IRPF).
+ *
+ * Aqui o estrago seria do mesmo tipo: a pessoa confere "declaracao de 2025"
+ * contra o PDF que ela entregou EM 2025 — que e o ano-calendario 2024 — e
+ * conclui que importamos o arquivo errado. O que guardamos e sempre o
+ * ano-calendario; o exercicio e ele mais um, e so existe no texto para remover
+ * a duvida.
+ */
+export function rotuloAnoDeclaracao(anoCalendario: number): string {
+  return `ano-calendário ${anoCalendario}, exercício ${anoCalendario + 1}`;
+}
+
 /** Confirmacao do import. Diz o que foi lido para a pessoa poder discordar —
  *  numero extraido de PDF que ninguem confere e numero que ninguem audita. */
 export function mensagemDeclaracaoImportada(dados: DeclaracaoExtraida): string {
   const partes = [
-    `Importei sua declaração de ${dados.ano_calendario}. O PDF já foi descartado; guardei só o resumo:`,
+    `Importei sua declaração de ${rotuloAnoDeclaracao(dados.ano_calendario)}. ` +
+    "O PDF já foi descartado; guardei só o resumo:",
   ];
 
   const linhas = [
@@ -484,7 +506,8 @@ export function complementoDoResumo(
   if (estimativa) {
     if (estimativa.valor > 0) {
       partes.push(
-        `Comparando com sua declaração de ${estimativa.anoBase}: o que você já registrou este ano ` +
+        `Comparando com sua declaração de ${rotuloAnoDeclaracao(estimativa.anoBase)}: ` +
+          "o que você já registrou este ano " +
           `representaria cerca de ${formatarReais(estimativa.valor)} a menos de imposto. ` +
           "É uma estimativa baseada no seu histórico, não uma garantia deste ano — sua renda e as regras podem ter mudado.",
       );
@@ -493,7 +516,8 @@ export function complementoDoResumo(
       // ja estava isento. Omitir deixaria a pessoa esperando um retorno que nao
       // vem.
       partes.push(
-        `Pelos números da sua declaração de ${estimativa.anoBase}, seu imposto já ficava zerado — ` +
+        `Pelos números da sua declaração de ${rotuloAnoDeclaracao(estimativa.anoBase)}, ` +
+          "seu imposto já ficava zerado — " +
           "então essas deduções não mudariam o valor a pagar. Continuo registrando tudo para o seu contador conferir.",
       );
     }
@@ -504,7 +528,8 @@ export function complementoDoResumo(
     const lista = ausentes.map(rotuloCategoria).join(" e ");
     const plural = ausentes.length > 1;
     partes.push(
-      `Uma pergunta: em ${declaracao.ano_calendario} você declarou despesa de ${lista}, e este ano eu ainda não ` +
+      `Uma pergunta: na sua declaração de ${rotuloAnoDeclaracao(declaracao.ano_calendario)} ` +
+        `você declarou despesa de ${lista}, e este ano eu ainda não ` +
         `registrei nada ${plural ? "nessas categorias" : "nessa categoria"}. ` +
         "Foi só não ter guardado o comprovante ainda, ou não teve esse gasto este ano?",
     );
