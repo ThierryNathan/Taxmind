@@ -230,8 +230,16 @@ Deno.test("o complemento do resumo entra sem quebrar o resumo existente", () => 
     CONSULTA.connections["Formatar Resumo"].main[0].map((d: any) => d.node),
     ["Edge - Complemento do Resumo"],
   );
+  // A fase 18 pos o bloco de pontos de atencao entre o complemento e o envio.
+  // O que este teste garante continua valendo: o complemento vem DEPOIS do
+  // Formatar Resumo e o ramo termina no envio — quem cobre a corrente nova em
+  // detalhe e tests/n8n_pontos_atencao_test.ts.
   assertEquals(
     CONSULTA.connections["Edge - Complemento do Resumo"].main[0].map((d: any) => d.node),
+    ["Edge - Pontos de Atenção"],
+  );
+  assertEquals(
+    CONSULTA.connections["Edge - Pontos de Atenção"].main[0].map((d: any) => d.node),
     ["WhatsApp - Enviar Resumo"],
   );
 
@@ -241,7 +249,12 @@ Deno.test("o complemento do resumo entra sem quebrar o resumo existente", () => 
 
   // E o envio tolera a ausencia de linhas.
   const envio: string = node(CONSULTA, "WhatsApp - Enviar Resumo").parameters.jsonBody;
-  assert(envio.includes("Array.isArray($json.linhas)"), "o envio precisa tolerar complemento vazio");
+  // O complemento deixou de ser o node imediatamente anterior ao envio, entao
+  // as linhas dele passaram a ser lidas por nome. A guarda de tipo continua.
+  assert(
+    envio.includes('Array.isArray($("Edge - Complemento do Resumo").first().json.linhas)'),
+    "o envio precisa tolerar complemento vazio",
+  );
   assert(envio.includes('$("Formatar Resumo").first().json.mensagem'));
 });
 
@@ -260,7 +273,13 @@ Deno.test("nenhum node depois do Formatar Resumo usa .item", () => {
   // unavailable", sem nenhuma mensagem chegando ao usuario.
   //
   // Medido no n8n 1.99.1 real: 1 categoria passava, 3 categorias nao.
-  for (const nome of ["Edge - Complemento do Resumo", "WhatsApp - Enviar Resumo"]) {
+  for (
+    const nome of [
+      "Edge - Complemento do Resumo",
+      "Edge - Pontos de Atenção",
+      "WhatsApp - Enviar Resumo",
+    ]
+  ) {
     const corpo: string = node(CONSULTA, nome).parameters.jsonBody;
     assert(
       !/\$\("[^"]+"\)\.item/.test(corpo),

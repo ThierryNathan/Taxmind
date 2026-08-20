@@ -9,7 +9,7 @@ O MVP automatiza captura, OCR, classificacao fiscal, trilha de auditoria e conso
 ## Stack Principal
 
 - Interface conversacional: WhatsApp Cloud API via webhooks oficiais da Meta.
-- Orquestracao: n8n em Docker, previsto para Oracle Cloud VM Linux Ampere A1.
+- Orquestracao: n8n em Docker, em VM Linux na Azure.
 - IA: Google Gemini (`gemini-3-flash-preview`) para classificacao textual, visual e de intencao.
 - Persistencia e autenticacao: Supabase/PostgreSQL com RLS.
 - Backend auxiliar: Python/Node.js para relatorios, consolidacao e scripts operacionais.
@@ -157,11 +157,83 @@ Passo a passo, a tabela de categorias e as medicoes em
 - O teste "sem pendencia, o prompt e o mesmo de antes" (fases 14 e 15) compara com `git show HEAD` e por isso quebra em **toda** adicao deliberada ao prompt base. O padrao ja estabelecido e filtrar a linha nova e cobrar o resto — nao remover a comparacao, que continua pegando qualquer outra deriva.
 - O gatilho de "cadastro concluido" nao existia e passou a ser a `bootstrap-identity`: e o unico ponto onde `onboarding_concluido` vira true, tem o telefone do token assinado e roda uma vez por cadastro. Fim do fluxo React foi descartado (navegador nao dispara WhatsApp sem expor credencial) e "primeira mensagem depois do cadastro" tambem (a mensagem chegaria fora de contexto, em resposta a outra coisa). O estado tem que ser lido **antes** do upsert — depois dele todo mundo e `true` e quem refaz o link receberia boas-vindas de novo.
 
+### Pontos de atencao antes de declarar
+
+Migration 012 (`pontos_atencao_usuario`), `_shared/pontos_atencao.ts`, o salto ano
+a ano em `_shared/declaracao_anterior.ts` e a Edge Function `pontos-atencao`.
+
+- **Nao e preditor de malha fina, e o texto nao pode sugerir que e.** O algoritmo
+  da Receita e confidencial. O que existe e agregacao de sinal ja gravado, por
+  causa conhecida de pedido de comprovacao. Ha teste que varre o bloco inteiro
+  com todos os sinais ligados e falha com qualquer `%`, "risco",
+  "probabilidade", "chance" ou "score", e que cobra a ressalva em todo bloco.
+- **Dois sinais da especificacao sao DEGENERADOS no schema real, e nao adianta
+  fingir que nao.** (1) "PARCIALMENTE_DEDUTIVEL sem percentual documentado" e o
+  mesmo conjunto que "PARCIALMENTE_DEDUTIVEL": nao existe campo de rateio em
+  lugar nenhum — nem coluna, nem no schema do prompt fiscal. Minerar
+  `justificativa_deducibilidade` por texto foi descartado (heuristica fragil
+  sobre texto livre de LLM). (2) "REVISAO_HUMANA sem revisao" nao filtra nada:
+  `revisado_em`/`revisado_por` sao declarados na 001 e **nenhum componente do
+  repositorio os escreve**. A clausula fica assim mesmo — o sinal seria falso no
+  dia em que a revisao existir, e sinal que so acerta por acidente e bug adiado.
+- O limiar de 30 dias e o ciclo mensal do carne-leao e do livro-caixa, nao numero
+  redondo. Medido no banco real (28 linhas em revisao, tres usuarios): 30 dias
+  marca 0, 14 marca 5/2/3, 7 marca 17/2/8 — aos 7 dias vira quase tudo que esta
+  em revisao, que e ruido.
+- **Ausencia de categoria na declaracao anterior NAO e evidencia de ausencia de
+  gasto.** A unica declaracao real importada em producao e SIMPLIFICADO com
+  `categorias_pagamentos: []` e `pagamentos_detalhados: []` — ficha nao
+  itemizada. Sem o gate `fichaPreenchida`, toda despesa de saude de quem usou o
+  desconto simplificado no ano passado viraria ponto de atencao. O gate e a
+  ficha, e nao o `modelo`: ficha preenchida sem saude e informativa ate numa
+  declaracao simplificada.
+- O criterio de salto exige as DUAS condicoes: `>= 2x` o valor do ano-base E
+  aumento `>= 5%` dos rendimentos tributaveis. O multiplo alto existe porque o
+  numero do TaxMind e parcial por construcao (so entra o que a pessoa mandou); a
+  ancora na renda existe porque o repositorio ja rejeitou hardcodar cifra fiscal
+  que envelhece, e porque o que chama conferencia e a desproporcao com a renda,
+  nao o valor absoluto. Sem renda no ano-base, silencio — nao chute.
+- A comparacao e assimetrica de proposito: dedutivel LIQUIDO deste ano contra
+  valor PAGO da ficha. A assimetria faz o criterio sub-disparar, que e o erro
+  barato dos dois.
+- **`_shared/pontos_atencao.ts` nao importa NADA, e isso e estrutural.** A
+  `export-contador` o importa so pelas marcas por item; com a comparacao ano a
+  ano dentro dele, a planilha do contador passava a carregar
+  `declaracao_anterior.ts` -> `irpf_calculo.ts` + `irpf_parametros.ts` +
+  `followup.ts` no bundle, e a exigir redeploy a cada mudanca de parametro
+  fiscal. O `deploy_drift_test.ts` mostrou isso na hora. O ponto de encontro e
+  `linhasPontosAtencao(contagens, itensExtras)`: quem tem a declaracao renderiza
+  os itens la e passa os textos. Ha teste que falha se o modulo ganhar qualquer
+  import.
+- Agregacao em SQL, e nao em TypeScript: 221 das 256 linhas do banco real vem do
+  Open Finance, e um usuario ativo passa de mil por ano. Medido com EXPLAIN
+  ANALYZE no usuario de maior volume (244 linhas): 0,4 ms, 46 buffers. Baixar as
+  linhas para contar quatro numeros gastaria banda e esbarraria no teto de linhas
+  do PostgREST, que hoje nao aparece so por causa do volume baixo.
+- O juizo de produto NAO fica no SQL: a funcao devolve contagens e o dedutivel
+  por categoria; limiares, criterio de salto e texto ficam no TypeScript,
+  testaveis sem banco. `p_dias_revisao` e parametro com default, e ha teste
+  comparando o default da migration com a constante do modulo — sao duas copias
+  do mesmo numero, e divergirem faria a mensagem afirmar um prazo e a contagem
+  usar outro, sem erro nenhum.
+- `formatarReaisComMilhar` existe ao lado de `formatarReais` porque o segundo nao
+  tem separador de milhar: usa-lo nas linhas novas entregaria "R$ 30000,00" numa
+  mensagem cujos totais, escritos pelo Code node `Formatar Resumo`, saem como
+  "R$ 30.000,00" — os dois formatos no MESMO texto. Trocar o antigo mudaria a
+  frase de estimativa da Fase 17, que ja esta em producao.
+- Mutacao e o que provou os testes: dos 14 mutantes, o unico sobrevivente inicial
+  foi "desligar o mapa de codigos da ficha" — as descricoes dos fixtures
+  ("Despesas medicas", "Instrucao") sao reconhecidas TAMBEM pelo fallback de
+  palavra-chave, entao o mapa de codigos nao estava sendo testado. Um caso com
+  nome comercial de operadora ("Unimed Central Nacional", codigo 11) e o que
+  separa os dois caminhos.
+
 ### Deploy das Edge Functions
 
 Incidente completo em `docs/09 - Incidente de Deploy Parcial.md`.
 
-- Function nova nao basta ser criada: a fase do export estruturado exigiu redeploy tambem da `bootstrap-identity`, cujo `index.ts` mudou e que passou a importar `_shared/boas_vindas.ts`. O `deploy_drift_test.ts` acusou os dois casos (function nao deployada e bundle atrasado) antes de qualquer coisa ir para producao — e e para isso que ele existe.
+- Function nova nao basta ser criada: a fase do export estruturado exigiu redeploy tambem da `bootstrap-identity`, cujo `index.ts` mudou e que passou a importar `_shared/boas_vindas.ts`. O `deploy_drift_test.ts` acusou o bundle atrasado antes de qualquer coisa ir para producao — e e para isso que ele existe.
+- **Function NUNCA deployada era ignorada pelo proprio drift test**, e a linha acima afirmava o contrario. Os dois testes de rede comparavam o bundle publicado com o repositorio e faziam `continue` quando nao havia bundle (`nao deployada (ignorada)`) — sem bundle nao ha o que comparar. O efeito era o pior possivel: criar a pasta da function, escrever o `index.ts` e esquecer o deploy passava com a suite inteira VERDE, que e o mesmo desfecho do incidente da Fase 15 por outro caminho. Hoje ha um terceiro teste (`toda function do repositorio existe no projeto`) que trata a ausencia como o erro.
 - **Function cujo `index.ts` nao mudou tambem precisa de redeploy quando um modulo de `_shared` que ela importa mudou.** O bundle carrega uma copia do modulo; o diff de diretorio nao ve essa dependencia. Foi assim que a Fase 15 foi para producao pela metade: `whatsapp-webhook/index.ts` nao mudou, o `_shared/followup.ts` que ela importa mudou, e a function ficou uma versao atras — passando a descartar toda pendencia de `valor_reembolso` porque `campoRespondivel` publicado nao conhecia o campo.
 - A suite inteira testa o **repositorio**, e por isso ficou verde durante o incidente. `tests/deploy_drift_test.ts` e o unico teste que afirma algo sobre o que esta **publicado**: le o fecho transitivo de `_shared` de cada function, baixa o bundle pela Management API e compara. Sem `~/.supabase/access-token` os testes de rede sao ignorados (nao existem na CI); com token, erro de API falha de proposito.
 - O bundle guarda codigo **transpilado**, entao comparar bytes nao serve. O que sobrevive: nomes de declaracoes de topo (o Deno **nao** minifica — verificado: `montarContextoReclassificacao` esta no bundle da `whatsapp-webhook` sem ser usada por ela), literais de string e numeros de `const` de topo. Nao pega troca de operador dentro de corpo de funcao.

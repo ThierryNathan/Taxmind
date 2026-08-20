@@ -2,7 +2,7 @@
 
 Diretorio para exports JSON dos workflows.
 
-Versao n8n alvo: a definir no primeiro ambiente Docker da Oracle Cloud VM.
+Versao n8n alvo: 1.99.1, como no docker-compose.yml e na VM Linux da Azure.
 
 ## Contrato de entrada
 

@@ -537,3 +537,299 @@ export function complementoDoResumo(
 
   return partes;
 }
+
+// ---------------------------------------------------------------------------
+// Salto de valor ano a ano (Fase 18)
+// ---------------------------------------------------------------------------
+//
+// A comparacao mora AQUI, e nao em _shared/pontos_atencao.ts, por dois motivos:
+//
+//   1. e a mesma familia de categoriasSemRegistroEsteAno logo acima — as duas
+//      confrontam o ano corrente com a ficha do ano-base, e as duas dependem de
+//      CATEGORIAS_ACOMPANHADAS. Separar deixaria duas nocoes de "categoria
+//      comparavel" em arquivos diferentes;
+//   2. este modulo arrasta o motor de IRPF e o modulo de follow-up para o bundle
+//      de quem o importa. A export-contador importa pontos_atencao.ts so pelas
+//      marcas por item; se a comparacao estivesse la, a planilha do contador
+//      passaria a carregar a tabela progressiva do IRPF e a exigir redeploy a
+//      cada mudanca de parametro fiscal — a dependencia invisivel de docs/09.
+//
+// Quem monta o bloco final e linhasPontosAtencao, que recebe daqui os itens ja
+// redigidos.
+
+/**
+ * Quantas vezes o valor do ano-base o total deste ano precisa alcancar para o
+ * salto ser reportado.
+ *
+ * O numero do TaxMind e PARCIAL por construcao: so entra o que a pessoa mandou.
+ * No banco real, 18 das 21 despesas de saude do usuario principal ainda estavam
+ * sem resposta de reembolso — cobertura incompleta e o estado normal, nao a
+ * excecao. Um aumento pequeno e muito mais provavel ser cobertura melhorando do
+ * que gasto saltando, e dobrar e o menor multiplo que nao se explica por
+ * inflacao nem por uma consulta a mais no ano.
+ */
+export const FATOR_SALTO = 2;
+
+/**
+ * Fracao dos rendimentos tributaveis do ano-base a partir da qual o AUMENTO
+ * absoluto e material.
+ *
+ * Ancorado na renda declarada, e nao num valor fixo em reais, por dois motivos:
+ *
+ *   - o repositorio ja rejeitou hardcodar cifra fiscal que muda todo ano (ver a
+ *     NOTA_PAGAMENTOS da export-contador, que remete o teto de educacao ao
+ *     contador em vez de imprimir um numero que envelhece);
+ *   - o que chama conferencia nao e o valor absoluto da deducao, e a
+ *     desproporcao dela em relacao a renda. 5% da renda em uma categoria so e
+ *     uma linha material no ajuste; R$ 5.000 pode ser muito ou irrelevante
+ *     dependendo de quem declara.
+ *
+ * As duas condicoes valem JUNTAS. So a razao marcaria R$ 100 -> R$ 400; so o
+ * absoluto marcaria a variacao normal de quem ganha muito.
+ */
+export const FRACAO_RENDA_MATERIAL = 0.05;
+
+export type BaselineDeclaracao = {
+  ano_calendario: number;
+  categorias_pagamentos: CategoriaDeclaracao[];
+  pagamentos_detalhados: Array<{ codigo?: string; descricao?: string; valor?: number }>;
+  rendimentos_tributaveis: number | null;
+  base_calculo: number | null;
+};
+
+/**
+ * Codigos da ficha "Pagamentos Efetuados" que mapeiam nas duas categorias
+ * acompanhadas.
+ *
+ * O codigo vem primeiro porque e o identificador estavel do formulario; a
+ * descricao e fallback porque a extracao le o que esta escrito no PDF, e o
+ * texto varia ("Despesas medicas no Brasil", "Plano de saude no Brasil").
+ */
+const CODIGOS_FICHA: Readonly<Record<string, CategoriaDeclaracao>> = {
+  "01": "EDUCACAO", // Instrucao no Brasil
+  "02": "EDUCACAO", // Instrucao no exterior
+  "10": "SAUDE", // Despesas medicas no Brasil
+  "11": "SAUDE", // Plano de saude no Brasil
+  "21": "SAUDE", // Despesas medicas no exterior
+  "26": "SAUDE", // Reembolso de despesa medica
+};
+
+const TERMOS_SAUDE = [
+  "medic",
+  "médic",
+  "saude",
+  "saúde",
+  "plano de",
+  "hospital",
+  "odonto",
+  "dentist",
+  "psic",
+  "fisioterap",
+];
+
+const TERMOS_EDUCACAO = [
+  "instru",
+  "escola",
+  "faculdade",
+  "ensino",
+  "educa",
+  "universi",
+  "creche",
+];
+
+function categoriaDoPagamento(
+  item: { codigo?: string; descricao?: string },
+): CategoriaDeclaracao | null {
+  const codigo = String(item.codigo ?? "").trim().padStart(2, "0");
+  if (CODIGOS_FICHA[codigo]) return CODIGOS_FICHA[codigo];
+
+  const descricao = String(item.descricao ?? "").toLowerCase();
+  if (!descricao) return null;
+  if (TERMOS_SAUDE.some((t) => descricao.includes(t))) return "SAUDE";
+  if (TERMOS_EDUCACAO.some((t) => descricao.includes(t))) return "EDUCACAO";
+  return null;
+}
+
+/**
+ * A ficha foi preenchida?
+ *
+ * ESTE E O GATE MAIS IMPORTANTE DO SINAL, e ele veio do dado real. A unica
+ * declaracao importada em producao tem `categorias_pagamentos: []` e
+ * `pagamentos_detalhados: []` — modelo SIMPLIFICADO, ficha nao itemizada. Ou
+ * seja: ausencia de categoria na declaracao NAO e evidencia de ausencia de
+ * gasto, e tratar como se fosse marcaria toda despesa de saude de quem usou o
+ * desconto simplificado no ano passado.
+ *
+ * Gatear pela ficha, e nao pelo `modelo`, e mais preciso: ficha preenchida sem
+ * saude e informativa mesmo numa declaracao simplificada (a pessoa itemizou e a
+ * categoria nao estava la), e ficha vazia nao informa nada nem na completa.
+ */
+export function fichaPreenchida(baseline: BaselineDeclaracao | null): boolean {
+  if (!baseline) return false;
+  return (baseline.categorias_pagamentos?.length ?? 0) > 0 ||
+    (baseline.pagamentos_detalhados?.length ?? 0) > 0;
+}
+
+/** Quanto o ano-base declarou em cada categoria acompanhada. Categoria fora do
+ *  mapa fica de fora — nao ha como comparar o que nao se sabe somar. */
+export function valorDeclaradoPorCategoria(
+  baseline: BaselineDeclaracao | null,
+): Map<CategoriaDeclaracao, number> {
+  const mapa = new Map<CategoriaDeclaracao, number>();
+  if (!baseline) return mapa;
+
+  for (const item of baseline.pagamentos_detalhados ?? []) {
+    const categoria = categoriaDoPagamento(item);
+    if (!categoria) continue;
+    const valor = Number(item.valor);
+    if (!Number.isFinite(valor) || valor <= 0) continue;
+    mapa.set(categoria, (mapa.get(categoria) ?? 0) + valor);
+  }
+
+  return mapa;
+}
+
+/**
+ * Renda de referencia do ano-base para o teste de materialidade.
+ *
+ * `rendimentos_tributaveis` primeiro porque e o denominador certo;
+ * `base_calculo` como aproximacao quando o PDF nao trouxe o primeiro. Sem
+ * nenhum dos dois devolve null e o sinal fica em silencio — a mesma postura de
+ * `estimarEconomia`, que prefere nao dizer nada a inventar numero.
+ */
+export function rendaDeReferencia(baseline: BaselineDeclaracao | null): number | null {
+  if (!baseline) return null;
+  const rendimentos = baseline.rendimentos_tributaveis;
+  if (rendimentos !== null && rendimentos > 0) return rendimentos;
+  const base = baseline.base_calculo;
+  if (base !== null && base > 0) return base;
+  return null;
+}
+
+export type SaltoAnoAAno = {
+  categoria: CategoriaDeclaracao;
+  valorEsteAno: number;
+  /** null no caso SEM_HISTORICO: a categoria nao apareceu na ficha do ano-base. */
+  valorAnoBase: number | null;
+  anoBase: number;
+  tipo: "SALTO" | "SEM_HISTORICO";
+};
+
+/**
+ * Categorias cujo dedutivel deste ano destoa do que a declaracao do ano-base
+ * mostrou.
+ *
+ * Restrito a SAUDE e EDUCACAO por CATEGORIAS_ACOMPANHADAS, cujo raciocinio esta
+ * logo acima: sao as duas que mapeiam 1 para 1 no enum categoria_fiscal, e
+ * comparar as outras seria comparar rotulos parecidos com significados
+ * diferentes.
+ *
+ * A comparacao e ASSIMETRICA de proposito: o lado de ca e o dedutivel LIQUIDO
+ * do reembolso, o lado de la e o valor PAGO informado na ficha. A assimetria
+ * puxa o nosso numero para baixo, entao ela faz o criterio sub-disparar, nunca
+ * sobre-disparar — que e o erro barato dos dois.
+ */
+export function detectarSaltos(
+  baseline: BaselineDeclaracao | null,
+  totaisCategoria: Array<{ categoria: string; total_dedutivel: number | string }>,
+): SaltoAnoAAno[] {
+  if (!baseline) return [];
+
+  const renda = rendaDeReferencia(baseline);
+  if (renda === null) return [];
+
+  const material = renda * FRACAO_RENDA_MATERIAL;
+  const declarado = valorDeclaradoPorCategoria(baseline);
+  const temFicha = fichaPreenchida(baseline);
+
+  const saltos: SaltoAnoAAno[] = [];
+
+  for (const categoria of CATEGORIAS_ACOMPANHADAS) {
+    const linha = (totaisCategoria ?? []).find(
+      (l) => String(l.categoria).toUpperCase() === categoria,
+    );
+    const esteAno = Number(linha?.total_dedutivel ?? 0);
+    if (!(esteAno > 0)) continue;
+
+    const anoBase = declarado.get(categoria) ?? null;
+
+    if (anoBase === null) {
+      // Sem historico: so vale quando a ficha FOI preenchida. Ficha vazia nao
+      // distingue "nao teve o gasto" de "nao itemizou".
+      if (!temFicha) continue;
+      if (esteAno < material) continue;
+      saltos.push({
+        categoria,
+        valorEsteAno: esteAno,
+        valorAnoBase: null,
+        anoBase: baseline.ano_calendario,
+        tipo: "SEM_HISTORICO",
+      });
+      continue;
+    }
+
+    if (esteAno < anoBase * FATOR_SALTO) continue;
+    if (esteAno - anoBase < material) continue;
+
+    saltos.push({
+      categoria,
+      valorEsteAno: esteAno,
+      valorAnoBase: anoBase,
+      anoBase: baseline.ano_calendario,
+      tipo: "SALTO",
+    });
+  }
+
+  return saltos;
+}
+
+/**
+ * Os itens de salto ja redigidos, SEM o marcador de lista — quem monta o bloco
+ * e `linhasPontosAtencao`.
+ *
+ * O texto e descritivo, nunca acusatorio: ele poe os dois numeros lado a lado e
+ * para por ai. O sistema nao sabe se o gasto realmente cresceu ou se o ano
+ * passado e que estava sub-registrado, e afirmar qualquer um dos dois seria
+ * errar metade das vezes com tom de cobranca — a mesma regra que faz a
+ * comparacao de categoria sair como pergunta em `complementoDoResumo`.
+ */
+/**
+ * Reais COM separador de milhar.
+ *
+ * Existe ao lado de `formatarReais` (que nao tem separador) de proposito, e a
+ * duplicacao e a escolha menos ruim entre tres:
+ *
+ *   - usar `formatarReais` aqui entregaria "R$ 30000,00" numa mensagem cujos
+ *     totais, escritos pelo Code node "Formatar Resumo", saem como
+ *     "R$ 30.000,00". Os dois formatos apareceriam no MESMO texto;
+ *   - trocar `formatarReais` mudaria a frase de estimativa de economia da fase
+ *     17, que ja esta em producao e nao faz parte desta mudanca.
+ *
+ * Os valores desta fase sao totais anuais por categoria, entao passam de mil
+ * com frequencia; os da estimativa raramente passam, que e por que a falta de
+ * separador la nunca incomodou.
+ */
+function formatarReaisComMilhar(valor: number): string {
+  return `R$ ${
+    valor.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  }`;
+}
+
+export function itensDeSaltoAnoAAno(
+  baseline: BaselineDeclaracao | null,
+  totaisCategoria: Array<{ categoria: string; total_dedutivel: number | string }>,
+): string[] {
+  return detectarSaltos(baseline, totaisCategoria).map((salto) => {
+    const rotulo = rotuloCategoria(salto.categoria);
+    const nome = rotulo.charAt(0).toUpperCase() + rotulo.slice(1);
+
+    if (salto.tipo === "SEM_HISTORICO") {
+      return `${nome}: ${formatarReaisComMilhar(salto.valorEsteAno)} dedutíveis este ano, ` +
+        `e essa categoria não aparece na sua declaração de ${rotuloAnoDeclaracao(salto.anoBase)}`;
+    }
+
+    return `${nome}: ${formatarReaisComMilhar(salto.valorEsteAno)} dedutíveis este ano contra ` +
+      `${formatarReaisComMilhar(salto.valorAnoBase ?? 0)} na sua declaração de ` +
+      rotuloAnoDeclaracao(salto.anoBase);
+  });
+}

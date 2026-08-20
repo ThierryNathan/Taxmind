@@ -34,6 +34,10 @@ import {
   valorLiquido,
 } from "../_shared/export_contador.ts";
 import { rotuloTitulo } from "../_shared/rotulos.ts";
+// Fase 18: as marcas por linha da coluna "Pontos de atencao". O modulo nao
+// julga nada de novo — le os mesmos campos que a planilha ja imprime e escreve
+// o rotulo. Ver a nota longa em _shared/pontos_atencao.ts sobre o que ele NAO e.
+import { celulaPontosAtencao } from "../_shared/pontos_atencao.ts";
 
 type ExportRequest = {
   usuario_id: string;
@@ -49,6 +53,10 @@ type ReciboRow = ReciboExportavel & {
   // Null = nunca perguntado; 0 = o titular confirmou que nao houve reembolso.
   // A distincao sobrevive ate a celula: vazia contra 0,00.
   valor_reembolsado: number | string | null;
+  // Nunca escrito por componente nenhum hoje (nao ha painel de revisao no MVP),
+  // e lido assim mesmo: a marca de "parado em revisao" seria falsa no dia em
+  // que a revisao existir, e sinal que so fica certo por acidente e bug adiado.
+  revisado_em: string | null;
 };
 
 const jsonHeaders = { "content-type": "application/json" };
@@ -108,6 +116,9 @@ export const CABECALHO_TABELA = [
   "Valor líquido (R$)",
   "Dedutibilidade (TaxMind)",
   "Status (TaxMind)",
+  // Ultima coluna de proposito: acrescentar no meio deslocaria COLUNAS_MOEDA e
+  // a formatacao de dinheiro cairia na coluna errada.
+  "Pontos de atenção",
 ];
 
 // Indices 0-based das colunas de dinheiro no CABECALHO_TABELA acima. Ficam em
@@ -221,7 +232,7 @@ async function fetchRecibos(usuarioId: string): Promise<ReciboRow[]> {
     .from("recibos_evidencias")
     // Literal unico: concatenar com + faz a inferencia de tipo do supabase-js
     // cair para GenericStringError e o cast abaixo parar de compilar.
-    .select("data_despesa, criado_em, descricao, estabelecimento, documento_prestador, categoria, valor, valor_reembolsado, deducibilidade, status")
+    .select("data_despesa, criado_em, descricao, estabelecimento, documento_prestador, categoria, valor, valor_reembolsado, deducibilidade, status, revisado_em")
     .eq("usuario_id", usuarioId)
     .order("data_despesa", { ascending: true, nullsFirst: false })
     .order("criado_em", { ascending: true });
@@ -256,7 +267,13 @@ async function ensureBucket() {
  * Monta o workbook. Exportada para permitir teste da planilha inteira sem subir
  * a function nem tocar em Supabase.
  */
-export function buildExportXlsx(nome: string, recibos: ReciboRow[]) {
+export function buildExportXlsx(
+  nome: string,
+  recibos: ReciboRow[],
+  // Injetavel para o teste da marca "parado em revisao" ser deterministico: sem
+  // isso, a coluna mudaria de conteudo conforme o dia em que a suite roda.
+  agora: Date = new Date(),
+) {
   const pagamentos: ReciboRow[] = [];
   const livroCaixa: ReciboRow[] = [];
 
@@ -285,6 +302,7 @@ export function buildExportXlsx(nome: string, recibos: ReciboRow[]) {
       titulo: "Pagamentos Efetuados",
       notas: [NOTA_PAGAMENTOS],
       recibos: pagamentos,
+      agora,
     }),
     ABA_PAGAMENTOS,
   );
@@ -297,6 +315,7 @@ export function buildExportXlsx(nome: string, recibos: ReciboRow[]) {
       titulo: "Possíveis deduções via Livro-Caixa",
       notas: [NOTA_LIVRO_CAIXA, NOTA_TRANSPORTE_FORA],
       recibos: livroCaixa,
+      agora,
     }),
     ABA_LIVRO_CAIXA,
   );
@@ -316,6 +335,7 @@ function montarAba(input: {
   titulo: string;
   notas: string[];
   recibos: ReciboRow[];
+  agora: Date;
 }) {
   const linhas: unknown[][] = [
     ["Preparado para revisão contábil"],
@@ -366,6 +386,7 @@ function montarAba(input: {
       liquido,
       humanize(recibo.deducibilidade),
       humanize(recibo.status),
+      celulaPontosAtencao(recibo, input.agora),
     ]);
   }
 
@@ -384,6 +405,7 @@ function montarAba(input: {
       totalLiquido,
       "",
       "",
+      "",
     ]);
   }
 
@@ -400,6 +422,7 @@ function montarAba(input: {
     { wch: 16 }, // Valor liquido
     { wch: 22 }, // Dedutibilidade
     { wch: 22 }, // Status
+    { wch: 44 }, // Pontos de atencao
   ];
   // Congela tudo que esta acima da primeira linha de dados, cabecalho incluso:
   // com o bloco de notas no topo, rolar a tabela levaria embora justamente o

@@ -389,6 +389,32 @@ Deno.test({
 });
 
 Deno.test({
+  name: "toda function do repositorio existe no projeto",
+  ignore: !TEM_CREDENCIAL,
+  fn: async () => {
+    // O PONTO CEGO QUE ISTO FECHA
+    //
+    // Os dois testes abaixo comparam o bundle publicado com o repositorio, e os
+    // dois fazem `continue` quando a function nunca foi deployada — sem bundle
+    // nao ha o que comparar. O efeito colateral e que criar a pasta da function,
+    // escrever o index.ts e esquecer o deploy passava com a suite inteira VERDE,
+    // que e o mesmo desfecho do incidente da Fase 15 (docs/09) por outro
+    // caminho: codigo no repositorio, comportamento ausente em producao.
+    //
+    // Aqui a ausencia e o proprio erro, e o nome da function sai na mensagem.
+    const publicadas = new Set(Object.keys(await metadados()));
+    const faltando = (await listarFunctions()).filter((slug) => !publicadas.has(slug));
+
+    assertEquals(
+      faltando,
+      [],
+      "Function existe no repositorio e nao no projeto. Deploy necessario:\n\n" +
+        faltando.map((slug) => `    supabase functions deploy ${slug}`).join("\n"),
+    );
+  },
+});
+
+Deno.test({
   name: "toda function que importa _shared tem o modulo dentro do bundle",
   ignore: !TEM_CREDENCIAL,
   fn: async () => {

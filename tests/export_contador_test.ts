@@ -63,6 +63,9 @@ function recibo(over: Record<string, unknown> = {}) {
     valor_reembolsado: null,
     deducibilidade: "DEDUTIVEL",
     status: APROVADO,
+    // Nenhum componente escreve esta coluna hoje (nao ha painel de revisao no
+    // MVP), entao null e o estado real de toda linha do banco.
+    revisado_em: null,
     ...over,
   };
 }
@@ -459,6 +462,53 @@ Deno.test("usuario sem despesa exportavel ainda recebe as duas abas", () => {
   // A nota do carne-leao vale mesmo com a aba vazia: ela explica o mecanismo,
   // nao as linhas.
   assert(textoDaAba(wb, ABA_LIVRO_CAIXA).includes(NOTA_LIVRO_CAIXA));
+});
+
+Deno.test("a coluna de pontos de atencao e a ultima, e marca linha a linha", () => {
+  // Fase 18. A coluna e a ULTIMA de proposito: acrescentar no meio deslocaria
+  // COLUNAS_MOEDA e a formatacao de dinheiro cairia na coluna errada.
+  const iAtencao = CABECALHO_TABELA.length - 1;
+  assertEquals(CABECALHO_TABELA[iAtencao], "Pontos de atenção");
+  for (const indice of COLUNAS_MOEDA) assert(indice < iAtencao);
+
+  const agora = new Date("2026-08-20T12:00:00.000Z");
+  const { bytes } = buildExportXlsx("Maria Teste", [
+    recibo({
+      descricao: "Consulta sem prestador",
+      categoria: "SAUDE",
+      documento_prestador: null,
+      estabelecimento: null,
+      valor_reembolsado: null,
+      status: "REVISAO_HUMANA",
+      criado_em: "2026-06-01T12:00:00.000Z",
+      data_despesa: "2026-06-01",
+    }),
+    recibo({
+      descricao: "Consulta completa",
+      categoria: "SAUDE",
+      valor_reembolsado: 0,
+      data_despesa: "2026-06-02",
+    }),
+  ], agora);
+
+  const linhas = linhasDeDados(abrir(bytes), ABA_PAGAMENTOS);
+  const marcada = linhas.find((l) => l[1] === "Consulta sem prestador");
+  const limpa = linhas.find((l) => l[1] === "Consulta completa");
+  assert(marcada && limpa);
+
+  // As tres marcas aplicaveis, na ordem em que o modulo as produz.
+  assertEquals(
+    marcada[iAtencao],
+    "sem identificação do prestador; reembolso não confirmado; em revisão há mais de 30 dias",
+  );
+  // Linha sem nenhuma marca fica com a celula em branco: um "-" ou um "ok"
+  // sugeriria conformidade verificada, que o sistema nao tem como afirmar.
+  //
+  // String vazia, e nao celula ausente como no reembolso: la o vazio CARREGA
+  // significado (lacuna contra resposta) e por isso a celula nao existe; aqui
+  // ausencia de marca e so ausencia, e manter todas as linhas com a mesma
+  // largura preserva a faixa de dados para o autofiltro do Excel.
+  assertEquals(limpa[iAtencao], "");
 });
 
 Deno.test("COLUNAS_MOEDA aponta para as colunas de dinheiro do cabecalho", () => {

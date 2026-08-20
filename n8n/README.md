@@ -4,7 +4,7 @@ Workflows exportados do n8n para o MVP TaxMind.
 
 ## Versao fixada
 
-- n8n: definir a versao usada na Oracle Cloud VM antes do primeiro deploy produtivo.
+- n8n: 1.99.1, a versao fixada no docker-compose.yml e usada na VM Linux da Azure.
 
 ## Convencao
 

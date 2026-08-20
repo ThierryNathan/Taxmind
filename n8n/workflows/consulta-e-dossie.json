@@ -532,7 +532,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $(\"Montar Contexto\").first().json.phone, type: \"text\", text: { body: [$(\"Formatar Resumo\").first().json.mensagem].concat(Array.isArray($json.linhas) ? $json.linhas : []).join(\"\\n\\n\") } }) }}",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: \"whatsapp\", to: $(\"Montar Contexto\").first().json.phone, type: \"text\", text: { body: [$(\"Formatar Resumo\").first().json.mensagem].concat(Array.isArray($(\"Edge - Complemento do Resumo\").first().json.linhas) ? $(\"Edge - Complemento do Resumo\").first().json.linhas : []).concat(Array.isArray($json.linhas) ? $json.linhas : []).join(\"\\n\\n\") } }) }}",
         "options": {}
       },
       "id": "2c5dcead-c99c-472e-b56c-ac1ac37f44ae",
@@ -1161,6 +1161,39 @@
     {
       "parameters": {
         "method": "POST",
+        "url": "={{ $env.SUPABASE_URL }}/functions/v1/pontos-atencao",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.SUPABASE_SECRET_KEY_SB_FORMAT }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ usuario_id: $(\"Montar Contexto\").first().json.usuario_id }) }}",
+        "options": {}
+      },
+      "id": "f18a0001-1a2b-4c3d-8e4f-a18000000001",
+      "name": "Edge - Pontos de Atenção",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -160,
+        620
+      ],
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
         "url": "=https://graph.facebook.com/v20.0/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
         "sendHeaders": true,
         "headerParameters": {
@@ -1510,7 +1543,7 @@
       "main": [
         [
           {
-            "node": "WhatsApp - Enviar Resumo",
+            "node": "Edge - Pontos de Atenção",
             "type": "main",
             "index": 0
           }
@@ -1523,6 +1556,17 @@
         [
           {
             "node": "WhatsApp - Enviar Falha do Resumo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edge - Pontos de Atenção": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp - Enviar Resumo",
             "type": "main",
             "index": 0
           }
