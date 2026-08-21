@@ -296,6 +296,65 @@ Deno.test("mensagem desconexa devolve SEM_RELACAO em vez de reclassificar", comC
   assert(!bruto.includes("<expense>"), "reclassificou uma mensagem desconexa");
 });
 
+// --- negacao na ABERTURA nao anula a evidencia que vem depois --------------
+//
+// A regra 2 do SEM_RELACAO lista "nao tenho" como resposta sem conteudo. Ate a
+// qualificacao com INTEIRA, uma mensagem que COMECAVA por esse termo e trazia
+// evidencia real em seguida caia entre duas instrucoes opostas, e o modelo nao
+// escolhia nenhuma das duas: largava a tarefa e respondia com uma apresentacao
+// da propria persona, sem <expense> e sem SEM_RELACAO.
+//
+// Os dois casos abaixo sao a mesma falha com desfechos diferentes, e por isso
+// os dois ficam: o primeiro devolvia apresentacao em 13 de 13 execucoes (falha
+// barulhenta, quebrava o teste acima), o segundo devolvia SEM_RELACAO 3/3 —
+// falha CALADA, que descartava evidencia legitima sem nenhum teste cobrindo.
+//
+// O contraprova de que a regra 2 continua viva e o teste da mensagem desconexa
+// acima mais "resposta seca nao reclassifica", logo abaixo: se a qualificacao
+// tivesse afrouxado a regra em vez de delimita-la, aqueles dois quebrariam.
+
+const NEGACAO_COM_EVIDENCIA: Array<[string, string]> = [
+  ["servico dito por extenso", "nao tenho o CNPJ agora, mas foi uma consulta com psicologa, sessao de terapia mesmo"],
+  ["outra especialidade", "nao tenho o CNPJ agora, mas foi uma consulta com dentista, limpeza mesmo"],
+];
+
+for (const [rotulo, mensagem] of NEGACAO_COM_EVIDENCIA) {
+  Deno.test(`negacao na abertura nao apaga a evidencia: ${rotulo}`, comChave, async () => {
+    const { expense } = await gerar(
+      `${PROMPT}\n\n${montarContextoReclassificacao(RECIBO_PENDENTE, PERGUNTA, mensagem)}`,
+    );
+
+    // Follow-up nunca reescreve quanto e quando.
+    assertEquals(expense.valor, 450, mensagem);
+    assertEquals(expense.data_despesa, "2026-08-08", mensagem);
+    assertEquals(expense.categoria, "SAUDE", mensagem);
+
+    // O documento continua faltando: a negacao era verdadeira. A evidencia nova
+    // melhora a descricao, nao promove a despesa.
+    assert(
+      expense.requer_revisao_humana === true ||
+        derivarCamposBloqueantes(expense).includes("documento_prestador"),
+      JSON.stringify({
+        mensagem,
+        revisao: expense.requer_revisao_humana,
+        destino: expense.deducibilidade_se_desbloqueado,
+      }),
+    );
+  });
+}
+
+Deno.test("resposta seca continua sem reclassificar, com ou sem negacao", comChave, async () => {
+  // O par que delimita a regra pelo outro lado: as duas mensagens estao na
+  // lista negra da regra 2 e nao trazem nada alem dela.
+  for (const seca of ["nao tenho o CNPJ agora", "ja mando, deixa eu ver aqui"]) {
+    const bruto = await gerarTexto(
+      `${PROMPT}\n\n${montarContextoReclassificacao(RECIBO_PENDENTE, PERGUNTA, seca)}`,
+    );
+    assert(bruto.includes("SEM_RELACAO"), `esperava SEM_RELACAO para "${seca}", veio: ${bruto.slice(0, 200)}`);
+    assert(!bruto.includes("<expense>"), `reclassificou a resposta seca "${seca}"`);
+  }
+});
+
 function textoNormalizado(valor: string): string {
   return valor
     .normalize("NFD")

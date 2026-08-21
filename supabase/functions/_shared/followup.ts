@@ -800,6 +800,36 @@ export function respostaSemConteudo(texto: string | null | undefined): boolean {
  * mensagem original, e texto de follow-up nao pode reescrever quanto e quando
  * em silencio) e a saida SEM_RELACAO, que e o que impede uma mensagem
  * desconexa de virar reclassificacao "aproveitada".
+ *
+ * O "INTEIRA" do caso 2 e uma palavra so, e ela custou uma investigacao.
+ * Enquanto a regra dizia apenas "negacao seca entra aqui", uma mensagem que
+ * ABRIA por um termo da lista e trazia evidencia real depois punha o modelo
+ * entre duas instrucoes opostas: "nao tenho" pedindo SEM_RELACAO e "consulta
+ * com psicologa" pedindo reclassificacao. O desfecho nao era nenhum dos dois —
+ * medido contra o Gemini real na temperatura e no thinkingLevel de producao, em
+ * 13 de 13 execucoes o modelo largava a tarefa e respondia com uma apresentacao
+ * da propria persona ("Sou o TaxMind, seu copiloto fiscal"), sem <expense> e
+ * sem SEM_RELACAO. Trocando so a ORDEM das mesmas palavras (evidencia antes,
+ * negacao depois) a mensagem voltava a extrair 3/3: nao era o conteudo, era a
+ * negacao em posicao de abertura. Um caso vizinho falhava calado pelo mesmo
+ * motivo — "nao tenho o CNPJ, mas foi uma consulta com dentista" devolvia
+ * SEM_RELACAO 3/3, descartando evidencia legitima.
+ *
+ * O criterio "mensagem inteira" e o mesmo que respostaSemConteudo ja aplica em
+ * codigo deterministico (`palavras.every(...)` sobre a lista negra), e ter os
+ * dois lados dizendo a mesma coisa e o ponto: o filtro deterministico roda
+ * ANTES e ja deixa essas mensagens passarem — faltava a instrucao parar de
+ * contradize-lo.
+ *
+ * NAO REESCREVER ESTE BLOCO PARA "EXPLICAR MELHOR". Ele esta perto de um
+ * penhasco de estabilidade, e a primeira tentativa de correcao foi um paragrafo
+ * a mais dizendo exatamente isto em prosa: ela consertou o caso alvo e QUEBROU
+ * dois que funcionavam (evidencia sem negacao nenhuma passou a devolver
+ * apresentacao 3/3). Cinco redacoes foram medidas lado a lado nos mesmos casos;
+ * acrescentar uma unica linha curta ao fim do bloco derrubou o placar de 5/7
+ * para 1/7, com apresentacao ate nos controles. A redacao atual e a de menor
+ * delta possivel — uma palavra e refluxo de linha — e foi a unica a fechar 7/7
+ * em 5 execucoes. Mudanca aqui se mede, nao se argumenta.
  */
 export function montarContextoReclassificacao(
   recibo: {
@@ -834,12 +864,12 @@ export function montarContextoReclassificacao(
     "",
     "Responda exatamente SEM_RELACAO, sem tags e sem JSON, em DOIS casos:",
     "1. a resposta nao tem nenhuma relacao com essa despesa;",
-    "2. a resposta nao acrescenta NENHUMA informacao nova sobre a despesa,",
-    "   ainda que seja uma reacao natural a pergunta. Confirmacao, negacao ou",
-    "   cortesia secas entram aqui: sim, ok, tenho, nao tenho, claro, beleza,",
-    "   ja mando, deixa eu ver. Nada disso identifica prestador, servico ou",
-    "   estabelecimento, e reclassificar por cima disso apagaria a pendencia",
-    "   sem ter respondido a pergunta.",
+    "2. a resposta INTEIRA nao acrescenta NENHUMA informacao nova sobre a",
+    "   despesa, ainda que seja uma reacao natural a pergunta. Confirmacao,",
+    "   negacao ou cortesia secas entram aqui: sim, ok, tenho, nao tenho,",
+    "   claro, beleza, ja mando, deixa eu ver. Nada disso identifica prestador,",
+    "   servico ou estabelecimento, e reclassificar por cima disso apagaria a",
+    "   pendencia sem ter respondido a pergunta.",
     "So reclassifique quando houver dado novo de verdade: nome do lugar, tipo",
     "de servico, quem atendeu, natureza da despesa ou documento.",
   ].join("\n");

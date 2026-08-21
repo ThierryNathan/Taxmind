@@ -21,3 +21,6 @@ supabase/.branches/
 n8n/.n8n/
 n8n/credentials.real.json
 
+
+# logs do tests/rodar_tudo.sh
+tests/.logs/

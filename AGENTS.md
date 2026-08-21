@@ -25,7 +25,7 @@ O MVP automatiza captura, OCR, classificacao fiscal, trilha de auditoria e conso
 - `scripts/` guarda utilitarios repetiveis de setup e seed.
 - `Mockup/` guarda o prototipo visual em Vite/React.
 - `apps/onboarding/` guarda o app real de onboarding (Vite/React), separado do `Mockup/`.
-- `tests/` guarda testes de Deno das Edge Functions, alem das pastas de fixtures, prompts e SQL. Rodar com `deno test --allow-env --allow-net tests/`. **A CI ainda nao executa esses testes** — `.github/workflows/ci.yml` so valida JSON dos workflows e existencia de migrations.
+- `tests/` guarda testes de Deno das Edge Functions, alem das pastas de fixtures, prompts e SQL. Rodar tudo com `bash tests/rodar_tudo.sh` (secao "Rodar a suite inteira", abaixo). **Nao** rodar `deno test tests/` de uma vez: cinco suites sobem `serve()` na mesma porta e colidem no mesmo processo. **A CI ainda nao executa esses testes** — `.github/workflows/ci.yml` so valida JSON dos workflows e existencia de migrations.
 
 ## Decisoes Arquiteturais
 
@@ -47,6 +47,59 @@ O MVP automatiza captura, OCR, classificacao fiscal, trilha de auditoria e conso
 ## Aprendizados Operacionais
 
 Armadilhas ja encontradas na pratica. Ler antes de mexer nas areas citadas.
+
+### Rodar a suite inteira
+
+`bash tests/rodar_tudo.sh` roda todos os `tests/*_test.ts` mais os testes SQL e
+imprime um resumo unico no final. Flags: `--offline` (nada de rede nem de
+credencial), `--pular-sql`, `--pular-rede`, `--pular-drift`, `--so-rede`,
+`--so-drift`, `--listar` (mostra o plano sem executar) e `--ajuda`. Logs por
+suite em `tests/.logs/` (ignorado pelo git). O script nao commita e nao faz
+push.
+
+- A ordem e **offline -> SQL -> rede -> deploy drift**, e o ultimo lugar do
+  `deploy_drift_test.ts` nao e por ele ser lento: ele e o unico teste da casa
+  que nao afirma nada sobre o repositorio — compara o bundle **publicado** com o
+  disco. "O codigo esta certo?" tem que ser respondido antes de "o que esta no
+  ar e esse codigo?", senao um drift vermelho no meio da lista e lido como bug
+  de codigo.
+- **Um processo por arquivo, e isso e obrigatorio**: `consentimento_bootstrap`,
+  `reverificacao_webhook`, `whatsapp_followup`, `followup_resolve` e
+  `pluggy_webhook_transacoes` importam o `index.ts` real de uma Edge Function,
+  que chama `serve()` na porta 8000. `deno test tests/` de uma vez so colide. Ha
+  ainda uma espera pela porta antes de cada uma dessas, contra o TIME_WAIT do
+  Windows.
+- **Permissao e um conjunto unico para todas as suites, e nao a linha "Rodar:"
+  de cada cabecalho.** A primeira versao do script copiou as permissoes arquivo
+  a arquivo e a primeira execucao deu duas falhas FALSAS:
+  `pontos_atencao_test.ts` nao tem linha "Rodar:" e le tres arquivos do disco, e
+  o cabecalho de `n8n_fase14_test.ts` pede `--allow-read` mas o teste roda
+  `git show HEAD`. Tabela de permissao escrita a mao e segunda fonte de verdade
+  que envelhece calada.
+- A unica excecao e `irpf_parametros_test.ts`, e ela e real: o arquivo faz
+  `Deno.permissions.query({name:"net"})` para decidir se confere as fixtures
+  contra o servico da Receita. Por isso ele roda **duas vezes** — no grupo
+  offline sem `--allow-net` e no grupo de rede com. Sao os dois modos que o
+  cabecalho dele documenta. Nenhum outro arquivo em `tests/` consulta permissao.
+- `IGNORADO` no resumo **nao e verde**: significa que o arquivo rodou e todos os
+  testes se auto-pularam por falta de credencial (`GEMINI_API_KEY`,
+  `PLUGGY_CLIENT_*`, `~/.supabase/access-token`). Nada foi provado, e o resumo
+  lista esses arquivos separadamente justamente para nao serem confundidos com
+  OK. `ERRO` e diferente de `FALHOU`: e o `deno test` morrendo antes de imprimir
+  resumo (erro de tipo, import quebrado, porta ocupada).
+- O plano e uma lista escrita a mao, entao o script **confere a cobertura**:
+  qualquer `tests/*_test.ts` que nao esteja no plano deixa o resumo vermelho.
+  Sem isso, um teste novo nunca rodaria e o resumo terminaria verde mentindo —
+  o mesmo desfecho que o `deploy_drift_test.ts` passou a tratar como erro quando
+  descobriu que function nunca deployada era ignorada em silencio.
+- Os testes do Gemini e o `deploy_drift_test.ts` leem `.env` por **caminho
+  relativo**; o script faz `cd` para a raiz por isso. Rodar de outro diretorio
+  os faz se auto-pular sem dizer por que. Ja o `pluggy_webhook_transacoes_test.ts`
+  so olha o ambiente (`Deno.env.get`), e nao o arquivo — o script exporta
+  `PLUGGY_CLIENT_ID`/`PLUGGY_CLIENT_SECRET` lidos do `.env` so para ele.
+- A coluna `PASSOS` existe porque `reverificacao_webhook_test.ts` usa `t.step`:
+  o `deno test` reporta "1 passed (19 steps)" e, sem a coluna, a suite aparece
+  como `1` no resumo e parece que quase nada rodou.
 
 ### n8n
 
@@ -92,6 +145,10 @@ contra o Gemini real, com os bugs achados e os candidatos a melhoria futura, em
 - O reconhecimento do documento e **lista negra, nao lista branca**. Exigir que toda palavra da mensagem esteja numa lista fechada de prefixos recusa a forma como a pessoa escreve: `cnpj dele e <CNPJ>` (frase real) morria em "dele" e virava despesa nova. O que segura o falso positivo nao sao as palavras, sao o digito verificador, o numero sobrando (valor) e um punhado de termos de gasto — ver `extrairDocumento` em `_shared/followup.ts`.
 - A instrucao `SEM_RELACAO` da reclassificacao testava **relacao**, nao **conteudo**, e por isso nao cobria o caso mais comum: `Sim` e perfeitamente relacionado a "voce tem o CNPJ?" e nao responde nada. Medido no Gemini real, dez respostas desse tipo reclassificaram em **22 de 30** execucoes, e de forma instavel (`Sim` fechou 1/3, `sim` 2/3, `ok` 0/3) — em todas, a analise voltou com estabelecimento e documento vazios. O estrago nao era so o ruido: a pendencia fechava com "anotei essa informacao" sem ter anotado, e o CNPJ da mensagem SEGUINTE ja nao tinha pendencia para responder. Hoje ha `respostaSemConteudo` em `_shared/followup.ts` rodando **antes** da chamada de IA, mais a instrucao reforcada no contexto para as formas que a lista nao preve (18/18 no Gemini real).
 - A guarda de conteudo e lista negra de mensagem **inteira**: so recusa quando toda palavra esta na lista, e qualquer digito no texto a desliga na hora (documento e valor sao digitos). Mesmo raciocinio do `extrairDocumento` — uma palavra de fora ja e evidencia potencial e segue para a IA.
+- **A instrucao SEM_RELACAO tinha que dizer "INTEIRA" tambem, e por anos nao dizia.** Enquanto a regra 2 do texto de `montarContextoReclassificacao` so listava "negacao seca entra aqui", uma mensagem que ABRIA por um termo da lista e trazia evidencia real depois punha o modelo entre duas instrucoes opostas — `nao tenho` pedindo SEM_RELACAO e `consulta com psicologa` pedindo reclassificacao. O desfecho nao era nenhum dos dois: medido no Gemini real na config de producao, **13/13** execucoes largavam a tarefa e devolviam uma apresentacao da persona ("Sou o TaxMind, seu copiloto fiscal"), sem `<expense>` e sem `SEM_RELACAO`. Trocando so a ORDEM das mesmas palavras (evidencia antes, negacao depois) voltava a extrair 3/3 — nao era o conteudo, era a negacao em posicao de abertura. Com `thinkingLevel: high` o modelo reconciliava sozinho 3/3, o que confirma conflito de instrucao e nao ruido de amostragem.
+- O caso irmao falhava **calado**: `nao tenho o CNPJ agora, mas foi uma consulta com dentista, limpeza mesmo` devolvia `SEM_RELACAO` 3/3, descartando evidencia legitima sem quebrar teste nenhum. Sempre que uma dessas instrucoes for mexida, medir os dois desfechos — o barulhento e o silencioso.
+- **O bloco do SEM_RELACAO esta perto de um penhasco de estabilidade, e "explicar melhor" o derruba.** A primeira correcao foi um paragrafo a mais dizendo em prosa exatamente o que "INTEIRA" diz: consertou o caso alvo e **quebrou dois que funcionavam** (evidencia sem negacao nenhuma passou a devolver apresentacao 3/3). Cinco redacoes medidas lado a lado nos mesmos casos: acrescentar **uma unica linha curta** ao fim do bloco derrubou o placar de 5/7 para **1/7**, com apresentacao ate nos controles (`sim`, mensagem desconexa). A redacao que ficou e a de menor delta possivel — uma palavra e refluxo de linha — unica a fechar 7/7 em 5 execucoes. Mudanca ali se mede contra o modelo real, nao se argumenta.
+- `montarContextoReclassificacao` tem **uma copia viva so** (`_shared/followup.ts`), e nao tres: a reclassificacao roda inteira dentro da `followup-resolve`, entao nao ha espelho no Code node nem em `prompt_fiscal.ts`. O aviso das tres copias vale para o **prompt fiscal**, que e outro texto. Mas o modulo e importado por `followup-resolve` **e** `whatsapp-webhook`: mexer nele pede redeploy das duas, e o `deploy_drift_test.ts` acusa.
 - A guarda fica **antes** de `reivindicar`: pendencia que nao foi respondida nao pode ser consumida. O orcamento continua sendo debitado na `whatsapp-webhook`, entao isso nao cria pendencia imortal.
 - Uma resposta de follow-up que **nao** e reconhecida nao cai em lugar nenhum inofensivo: ela segue para o classificador de intencao, que a le como `registro_despesa` (verificado no Gemini real, temperatura 0), e o prompt fiscal devolve `valor: 0` tentando dar sentido ao texto. O custo do erro de desambiguacao e maior do que "a pendencia expira".
 - O classificador de intencao **nao sabia que havia pergunta pendente**, e por isso lia toda resposta em texto livre como despesa nova: `foi na clinica vida`, `nao tenho o cnpj mas foi na clinica vida`, `hospital sirio libanes` — **9/9** viraram `registro_despesa` no Gemini real. Como so o intent `outro` chega na `followup-resolve`, o modo `RECLASSIFICADO` era inalcancavel na pratica, e cada resposta virava despesa sem valor morrendo na guarda de valor. Hoje a `Preparar Contexto` deriva `followup_contexto` do campo da pendencia e o prompt do classificador ganha a categoria `resposta_de_followup` **so quando ha pendencia aberta** — sem pendencia o prompt e byte a byte o de antes, e ha teste comparando com `git show HEAD`. O discriminador escrito no prompt e "valor em dinheiro de gasto novo e `registro_despesa`". Medido: 23/23, incluindo 6/6 despesas novas que continuam sendo despesa.
